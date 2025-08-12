@@ -1,5 +1,5 @@
 """
-Authentication API routes for Meetings AI application.
+Authentication routes - login, logout, registration.
 """
 import logging
 from flask import Blueprint, request, jsonify, render_template, session
@@ -12,25 +12,25 @@ logger = logging.getLogger(__name__)
 
 def create_auth_blueprint(base_path: str, auth_service: AuthService) -> Blueprint:
     """
-    Create authentication blueprint with routes.
+    Set up all the authentication routes.
     
     Args:
-        base_path: Base path for routes (e.g., '/meetingsai')
-        auth_service: Authentication service instance
+        base_path: URL prefix like '/meetingsai'
+        auth_service: Service that handles user stuff
         
     Returns:
-        Flask Blueprint
+        Flask Blueprint with all the routes
     """
     auth_bp = Blueprint('auth', __name__)
     
     @auth_bp.route(f'{base_path}/register', methods=['GET', 'POST'])
     def register():
-        """User registration endpoint."""
+        """Handle new user registration."""
         if request.method == 'GET':
             return render_template('register.html')
         
         try:
-            # Get request data
+            # Parse the registration form data
             data = request.get_json()
             if not data:
                 logger.error("No JSON data received in registration request")
@@ -42,11 +42,11 @@ def create_auth_blueprint(base_path: str, auth_service: AuthService) -> Blueprin
             password = data.get('password', '')
             confirm_password = data.get('confirm_password', '')
             
-            # Basic validation
+            # Make sure passwords match
             if password != confirm_password:
                 return jsonify({'success': False, 'error': 'Passwords do not match'}), 400
             
-            # Register user
+            # Try to create the user account
             success, message, user_id = auth_service.register_user(username, email, full_name, password)
             
             if success:
@@ -64,7 +64,7 @@ def create_auth_blueprint(base_path: str, auth_service: AuthService) -> Blueprin
     
     @auth_bp.route(f'{base_path}/login', methods=['GET', 'POST'])
     def login():
-        """User login endpoint."""
+        """Handle user login."""
         if request.method == 'GET':
             return render_template('login.html')
         
@@ -76,13 +76,13 @@ def create_auth_blueprint(base_path: str, auth_service: AuthService) -> Blueprin
             if not username or not password:
                 return jsonify({'success': False, 'error': 'Username and password are required'}), 400
             
-            # Authenticate user
+            # Check username and password
             success, message, user = auth_service.authenticate_user(username, password)
             
             if not success:
                 return jsonify({'success': False, 'error': message}), 401
             
-            # Create session
+            # Log them in and create a session
             session_success = auth_service.login_user_session(user, remember=True)
             
             if not session_success:

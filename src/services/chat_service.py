@@ -1,6 +1,6 @@
 """
-Chat service for Meetings AI application.
-Handles AI-powered chat interactions and query processing with enhanced context management.
+Chat service - handles all the AI chat stuff.
+Takes user questions and finds relevant documents, then asks the AI to answer.
 """
 import logging
 import re
@@ -15,26 +15,26 @@ logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    """Service for handling chat and AI query operations."""
+    """Handles all chat functionality and AI queries."""
     
     def __init__(self, db_manager: DatabaseManager, processor=None):
         """
-        Initialize chat service with enhanced context management.
+        Set up the chat service.
         
         Args:
-            db_manager: Database manager instance
-            processor: Document processor instance (optional for backwards compatibility)
+            db_manager: Database connection handler
+            processor: Document processor (optional, for backward compatibility)
         """
         self.db_manager = db_manager
-        self.processor = processor  # For backwards compatibility with existing processor methods
+        self.processor = processor  # Keep the old processor around for compatibility
         
-        # Initialize enhanced components
+        # Set up the enhanced context and prompt managers
         self.enhanced_context_manager = EnhancedContextManager(db_manager, processor)
         self.prompt_manager = EnhancedPromptManager()
         
-        # Feature flags for gradual rollout
-        self.use_enhanced_processing = True  # Enable enhanced processing by default
-        self.enhanced_summary_threshold = 10  # Use enhanced for queries with 10+ potential documents
+        # Settings for when to use enhanced vs legacy processing
+        self.use_enhanced_processing = True  # Use the better processing by default
+        self.enhanced_summary_threshold = 10  # Switch to enhanced when dealing with lots of docs
     
     def process_chat_query(
         self,
@@ -48,66 +48,54 @@ class ChatService:
         folder_path: Optional[str] = None
     ) -> Tuple[str, List[str], str]:
         """
-        Process a chat query and generate AI response.
+        Main function to handle user chat queries.
         
-        Args:
-            message: User's chat message
-            user_id: ID of the user
-            document_ids: Optional list of specific document IDs to search
-            project_id: Optional project ID filter
-            project_ids: Optional list of project IDs to filter
-            meeting_ids: Optional list of meeting IDs to filter
-            date_filters: Optional date filters
-            folder_path: Optional folder path filter
-            
+        Takes the user's question and all the filters they might have set,
+        then figures out the best way to answer it.
+        
         Returns:
-            Tuple of (response, follow_up_questions, timestamp)
+            (AI response, suggested follow-up questions, timestamp)
         """
         try:
-            # ===== DEBUG LOGGING: CHAT SERVICE ENTRY =====
-            logger.info("[SERVICE] ChatService.process_chat_query() - ENTRY POINT")
-            logger.info(f"[PARAMS] Parameters received:")
-            logger.info(f"   - message: '{message}'")
-            logger.info(f"   - user_id: {user_id}")
-            logger.info(f"   - document_ids: {document_ids}")
-            logger.info(f"   - project_id: {project_id}")
-            logger.info(f"   - project_ids: {project_ids}")
-            logger.info(f"   - meeting_ids: {meeting_ids}")
-            logger.info(f"   - date_filters: {date_filters}")
-            logger.info(f"   - folder_path: {folder_path}")
+            # Log what we're working with
+            logger.info(f"Processing chat query: '{message[:50]}...' for user {user_id}")
+            if document_ids:
+                logger.info(f"Filtering to specific documents: {document_ids}")
+            if project_id or project_ids:
+                logger.info(f"Project filter: {project_id or project_ids}")
+            if meeting_ids:
+                logger.info(f"Meeting filter: {meeting_ids}")
+            if date_filters:
+                logger.info(f"Date filter: {date_filters}")
             
-            # Check if documents are available
-            logger.info("[STEP1] Checking vector database status...")
+            # Make sure we have documents to work with
             try:
                 index_stats = self.db_manager.get_index_stats()
                 vector_size = index_stats.get('total_vectors', 0)
-                logger.info(f"[STATS] Vector database stats: {index_stats}")
+                logger.info(f"Found {vector_size} document chunks in database")
             except Exception as e:
-                logger.error(f"[ERROR] Error checking vector database: {e}")
+                logger.error(f"Error checking database: {e}")
                 vector_size = 0
             
-            logger.info(f"[VECTORS] Total vectors available: {vector_size}")
-            
             if vector_size == 0:
-                logger.warning("[WARNING] NO VECTORS FOUND - Returning 'no documents' response")
+                logger.warning("No documents found - user needs to upload some first")
                 response = "I don't have any documents to analyze yet. Please upload some meeting documents first!"
                 follow_up_questions = []
             else:
-                logger.info("[OK] Vectors available - proceeding with query processing")
                 
-                # Determine processing strategy
+                # Figure out which processing method to use
                 should_use_enhanced = self._should_use_enhanced_processing(
                     message, user_id, document_ids, project_id, project_ids, meeting_ids
                 )
                 
                 if should_use_enhanced and self.use_enhanced_processing:
-                    logger.info("[ENHANCED] Using enhanced context processing")
+                    logger.info("Using enhanced processing for this query")
                     response, follow_up_questions = self._process_with_enhanced_context(
                         message, user_id, document_ids, project_id, project_ids, 
                         meeting_ids, date_filters, folder_path
                     )
                 else:
-                    logger.info("[LEGACY] Using legacy processor for query processing")
+                    logger.info("Using legacy processor for this query")
                     response, follow_up_questions = self._process_with_legacy_processor(
                         message, user_id, document_ids, project_id, project_ids,
                         meeting_ids, date_filters, folder_path

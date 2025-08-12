@@ -1,6 +1,6 @@
 """
-Flask application for Meetings AI - Refactored with modular architecture.
-Maintains IIS compatibility while providing clean separation of concerns.
+Flask app for the Meetings AI system.
+Handles routing, user sessions, and connects everything together for IIS deployment.
 """
 from flask import Flask, render_template, redirect, session
 from flask_login import LoginManager, login_required
@@ -58,7 +58,7 @@ _application_initialized = False
 
 
 def create_flask_app():
-    """Create and configure Flask application."""
+    """Set up the Flask app with proper config."""
     global app
     
     # Create Flask app with dynamic paths
@@ -77,14 +77,13 @@ def create_flask_app():
 
 
 def initialize_services():
-    """Initialize all services and dependencies."""
+    """Boot up all the services we need for the app."""
     global db_manager, services, processor
     
     try:
         logger.info("Initializing services...")
         
-        # Initialize AI clients (following instructions.md)
-        # Check if already initialized in meeting_processor global scope
+        # Set up AI clients - check if they're already ready to go
         try:
             from meeting_processor import access_token, embedding_model, llm
             if access_token and embedding_model and llm:
@@ -101,10 +100,10 @@ def initialize_services():
         db_manager = DatabaseManager()
         logger.info("Database manager initialized")
         
-        # Initialize processor for backwards compatibility - share database manager
+        # Set up the document processor - reuse the same db connection
         if EnhancedMeetingDocumentProcessor:
             try:
-                # Pass database manager directly to avoid creating duplicate instances
+                # Share the database manager to avoid multiple connections
                 processor = EnhancedMeetingDocumentProcessor(
                     chunk_size=1000, 
                     chunk_overlap=200, 
@@ -115,7 +114,7 @@ def initialize_services():
                 logger.error(f"Failed to initialize processor: {e}")
                 processor = None
         
-        # Initialize services
+        # Wire up all the service classes
         services['auth_service'] = AuthService(db_manager)
         services['chat_service'] = ChatService(db_manager, processor)
         services['document_service'] = DocumentService(db_manager, processor)
@@ -130,7 +129,7 @@ def initialize_services():
 
 
 def setup_flask_login():
-    """Setup Flask-Login configuration."""
+    """Configure user login handling."""
     login_manager = LoginManager()
     login_manager.init_app(app)
     login_manager.login_view = f'{BASE_PATH}/login'
@@ -139,24 +138,24 @@ def setup_flask_login():
     
     @login_manager.user_loader
     def load_user(user_id):
-        """Load user for Flask-Login."""
+        """Pull user info from database for login sessions."""
         return services['auth_service'].load_user_for_session(user_id)
     
     logger.info("Flask-Login configured")
 
 
 def register_core_routes():
-    """Register core application routes."""
+    """Set up the main app routes."""
     
     @app.route('/')
     def root():
-        """Root redirect to base path."""
+        """Just redirect to the main app path."""
         return redirect(f'{BASE_PATH}/')
     
     @app.route(f'{BASE_PATH}/')
     @app.route(f'{BASE_PATH}')
     def index():
-        """Main chat interface."""
+        """Show the chat page."""
         try:
             return render_template('chat.html', config={
                 'basePath': BASE_PATH,
@@ -169,7 +168,7 @@ def register_core_routes():
     @app.route(f'{BASE_PATH}/api/refresh', methods=['POST'])
     @login_required
     def refresh_system():
-        """Refresh the system."""
+        """Restart the AI system."""
         try:
             logger.info("System refresh requested")
             if processor:

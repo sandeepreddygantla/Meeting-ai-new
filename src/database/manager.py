@@ -1,6 +1,6 @@
 """
-Main database manager that combines vector and SQLite operations.
-This module provides a unified interface for all database operations.
+Database manager - handles both the SQLite database and FAISS vector index.
+Everything goes through this class so we don't have to worry about syncing.
 """
 
 import logging
@@ -12,7 +12,7 @@ import os
 from .vector_operations import VectorOperations
 from .sqlite_operations import SQLiteOperations
 
-# Import global variables and data classes from the main module
+# Get the AI clients and data classes from meeting_processor
 from meeting_processor import (
     access_token, embedding_model, llm,
     DocumentChunk, User, Project, Meeting, MeetingDocument
@@ -23,45 +23,45 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Unified database manager combining vector and SQLite operations.
-    Provides a single interface for all database functionality.
+    Main database handler that manages both SQLite and vector operations.
+    Everything database-related goes through here.
     """
     
     def __init__(self, db_path: str = "meeting_documents.db", index_path: str = "vector_index.faiss"):
         """
-        Initialize the database manager
+        Set up the database manager.
         
         Args:
-            db_path: Path to SQLite database file
-            index_path: Path to FAISS index file
+            db_path: Where to store the SQLite database
+            index_path: Where to store the FAISS vector index
         """
         self.db_path = db_path
         self.index_path = index_path
         self.dimension = 3072  # text-embedding-3-large dimension
         
-        # Initialize both operations handlers
+        # Set up the SQLite and vector operations
         self.sqlite_ops = SQLiteOperations(db_path)
         self.vector_ops = VectorOperations(index_path, self.dimension)
         
-        # Load existing chunk metadata from database
+        # Sync vector index with existing database data
         self.vector_ops.rebuild_chunk_metadata(db_path)
         
-        # Keep track of document metadata for compatibility
+        # Cache document metadata for faster access
         self.document_metadata = {}
         
         logger.info("Database manager initialized with SQLite and FAISS operations")
     
-    # Combined Operations (Vector + SQLite)
+    # Methods that work with both databases
     def add_document(self, document, chunks: List):
         """
-        Add document and its chunks to both SQLite and FAISS databases
+        Add a document and all its chunks to both databases.
         
         Args:
-            document: MeetingDocument object
-            chunks: List of DocumentChunk objects
+            document: Document info
+            chunks: List of text chunks with embeddings
         """
         try:
-            # Extract embeddings for FAISS
+            # Pull out the embedding vectors for FAISS
             vectors = []
             chunk_ids = []
             
@@ -70,14 +70,14 @@ class DatabaseManager:
                     vectors.append(chunk.embedding)
                     chunk_ids.append(chunk.chunk_id)
             
-            # Add to SQLite first (includes document and chunk metadata)
+            # Save to SQLite first (document info and chunk text)
             self.sqlite_ops.add_document_and_chunks(document, chunks)
             
-            # Add vectors to FAISS index
+            # Save vectors to FAISS for similarity search
             if vectors:
                 self.vector_ops.add_vectors(vectors, chunk_ids)
             
-            # Store document metadata for compatibility
+            # Keep document info in memory for quick access
             self.document_metadata[document.document_id] = document
             
             logger.info(f"Successfully added document {document.filename} with {len(chunks)} chunks to both databases")
