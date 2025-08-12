@@ -26,6 +26,7 @@ class EnhancedPromptManager:
             'summary_query': self._get_summary_query_template(),
             'comprehensive_summary': self._get_comprehensive_summary_template(),
             'detailed_analysis': self._get_detailed_analysis_template(),
+            'document_specific': self._get_document_specific_template(),
             'multi_meeting_synthesis': self._get_multi_meeting_synthesis_template()
         }
         
@@ -248,6 +249,31 @@ PROFESSIONAL STANDARDS:
 - Ensure recommendations are grounded in the available evidence
 
 Your analysis should be comprehensive enough to serve as a definitive resource on the topic, providing both detailed information and strategic insights that enable informed decision-making."""
+
+    def _get_document_specific_template(self) -> str:
+        """Template for document-specific queries that must prevent hallucination."""
+        return """You are a helpful AI assistant providing information ONLY from the specific document(s) provided in the context. You must not add any information that is not explicitly contained in the provided document content.
+
+USER QUERY: "{query}"
+
+DOCUMENT CONTENT PROVIDED:
+{context}
+
+CRITICAL INSTRUCTIONS:
+1. **ONLY use information explicitly provided in the document content above**
+2. **DO NOT create, infer, or assume any meeting dates, participants, or details not shown**
+3. **DO NOT provide information about meetings other than those in the provided content**
+4. **If specific information is not in the provided content, state that it's not available**
+5. **Always cite the specific document filename when referencing information**
+
+RESPONSE REQUIREMENTS:
+- Answer the user's question using ONLY the provided document content
+- If the requested information is not in the documents, clearly state it's not available
+- Be specific and direct - do not elaborate beyond what is explicitly provided
+- Always cite document sources by filename
+- If you cannot answer the question with the provided content, explain what information would be needed
+
+Your response must be factual, accurate, and limited strictly to what is contained in the provided document content. Do not speculate or provide additional context not present in the documents."""
 
     def _get_multi_meeting_synthesis_template(self) -> str:
         """Template for synthesizing information across multiple meetings."""

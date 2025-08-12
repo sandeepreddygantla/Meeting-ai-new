@@ -10,6 +10,7 @@ import logging
 # Import configuration
 from src.config.settings import setup_flask_config, get_base_path
 from src.config.database import setup_database_session, ensure_directories_exist
+from src.config.postgres_sessions import setup_postgres_session
 
 # Import AI client initialization
 from src.ai.llm_client import initialize_ai_clients
@@ -74,8 +75,7 @@ def create_flask_app():
     # Setup configuration
     setup_flask_config(app, BASE_PATH)
     
-    # Setup database session interface for IIS compatibility
-    setup_database_session(app)
+    # Setup session interface will be done after database manager is initialized
     
     logger.info(f"Flask app created with base path: {BASE_PATH}")
     return app
@@ -133,6 +133,15 @@ def initialize_services():
             except Exception as e:
                 logger.error(f"Failed to initialize processor: {e}")
                 processor = None
+        
+        # Setup session interface based on database type
+        if USE_POSTGRES:
+            from src.config.postgres_sessions import setup_postgres_session
+            setup_postgres_session(app, db_manager)
+            logger.info("PostgreSQL session interface configured")
+        else:
+            setup_database_session(app)
+            logger.info("SQLite session interface configured")
         
         # Wire up all the service classes
         services['auth_service'] = AuthService(db_manager)

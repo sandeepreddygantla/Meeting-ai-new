@@ -250,11 +250,11 @@ class EnhancedContextManager:
             # Get detailed context for targeted documents
             context_chunks = self._get_detailed_context(targeted_documents, query_context)
             
-            # Use detailed analysis template for targeted queries
+            # Use document-specific template for targeted queries to prevent hallucination
             enhanced_prompt = self.prompt_manager.generate_enhanced_prompt(
                 query_context.query,
                 context_chunks,
-                query_type='detailed_analysis'
+                query_type='document_specific'
             )
             
             response = self._generate_llm_response(enhanced_prompt)
@@ -365,19 +365,19 @@ class EnhancedContextManager:
         for doc in documents:
             # Get document chunks using database manager
             try:
-                doc_chunks = self.db_manager.get_document_chunks(doc.document_id)
+                doc_chunks = self.db_manager.get_document_chunks(doc['document_id'])
                 
                 for chunk in doc_chunks:
                     context_chunks.append({
                         'text': chunk.content if hasattr(chunk, 'content') else '',
-                        'document_name': getattr(doc, 'filename', 'Unknown'),
-                        'document_id': doc.document_id,
+                        'document_name': doc.get('filename', 'Unknown'),
+                        'document_id': doc['document_id'],
                         'chunk_id': chunk.chunk_id if hasattr(chunk, 'chunk_id') else '',
-                        'timestamp': getattr(doc, 'created_at', None),
+                        'timestamp': doc.get('upload_date', None),
                         'metadata': {
-                            'project_id': getattr(doc, 'project_id', None),
-                            'meeting_id': getattr(doc, 'meeting_id', None),
-                            'title': getattr(doc, 'summary', '') or getattr(doc, 'filename', '')
+                            'project_id': doc.get('project_id'),
+                            'meeting_id': doc.get('meeting_id'),
+                            'title': doc.get('content_summary', '') or doc.get('filename', '')
                         }
                     })
                     
@@ -385,7 +385,7 @@ class EnhancedContextManager:
                         break
                         
             except Exception as e:
-                logger.error(f"[ERROR] Failed to get chunks for document {doc.document_id}: {e}")
+                logger.error(f"[ERROR] Failed to get chunks for document {doc['document_id']}: {e}")
                 continue
             
             if len(context_chunks) >= max_chunks:
@@ -408,32 +408,32 @@ class EnhancedContextManager:
             
             # Apply project filter
             if query_context.project_id:
-                documents = [d for d in documents if getattr(d, 'project_id', None) == query_context.project_id]
+                documents = [d for d in documents if d.get('project_id') == query_context.project_id]
                 logger.info(f"[FILTER] After project filter: {len(documents)} documents")
             
             # Apply meeting filter
             if query_context.meeting_ids:
-                documents = [d for d in documents if getattr(d, 'meeting_id', None) in query_context.meeting_ids]
+                documents = [d for d in documents if d.get('meeting_id') in query_context.meeting_ids]
                 logger.info(f"[FILTER] After meeting filter: {len(documents)} documents")
             
             # Apply document filter
             if query_context.document_ids:
                 logger.info(f"[FILTER] Filtering by document IDs: {query_context.document_ids}")
                 original_count = len(documents)
-                documents = [d for d in documents if d.document_id in query_context.document_ids]
+                documents = [d for d in documents if d['document_id'] in query_context.document_ids]
                 logger.info(f"[FILTER] After document filter: {len(documents)} documents (was {original_count})")
                 
                 # Debug: Log which documents were selected
                 for doc in documents:
-                    logger.info(f"[FILTER] Selected document: ID={doc.document_id}, filename='{doc.filename}', date='{getattr(doc, 'extracted_date', getattr(doc, 'created_at', 'N/A'))}'")
+                    logger.info(f"[FILTER] Selected document: ID={doc['document_id']}, filename='{doc['filename']}', date='{doc.get('upload_date', 'N/A')}'")
                 
                 if len(documents) == 0:
                     logger.warning(f"[FILTER] No documents found matching IDs: {query_context.document_ids}")
-                    logger.info(f"[FILTER] Available document IDs: {[d.document_id for d in self.db_manager.get_all_documents(query_context.user_id)]}")
+                    logger.info(f"[FILTER] Available document IDs: {[d['document_id'] for d in self.db_manager.get_all_documents(query_context.user_id)]}")
             
             # Apply folder filter
             if query_context.folder_path:
-                documents = [d for d in documents if query_context.folder_path in getattr(d, 'folder_path', '')]
+                documents = [d for d in documents if query_context.folder_path in d.get('folder_path', '')]
                 logger.info(f"[FILTER] After folder filter: {len(documents)} documents")
             
             # Apply date filters

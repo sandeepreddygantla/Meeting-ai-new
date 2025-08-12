@@ -351,7 +351,7 @@ class EnhancedMeetingDocumentProcessor:
             
             for doc in docs:
                 # Add document summary
-                doc_summary = f"Document: {doc.filename}\n"
+                doc_summary = f"Document: {getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))}\n"
                 if doc.content_summary:
                     doc_summary += f"Summary: {doc.content_summary}\n"
                 if doc.main_topics:
@@ -410,7 +410,7 @@ class EnhancedMeetingDocumentProcessor:
                 fallback_parts.append(f"\n**{date_formatted}:**")
                 
                 for doc in docs:
-                    fallback_parts.append(f"\n• **{doc.filename}**")
+                    fallback_parts.append(f"\n• **{getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))}**")
                     
                     # Include actual content summary if available
                     if doc.content_summary:
@@ -1100,14 +1100,12 @@ Examples:
             chunk = DocumentChunk(
                 chunk_id=chunk_id,
                 document_id=document.document_id,
-                filename=document.filename,
-                chunk_index=i,
+                user_id=document.user_id,
                 content=chunk_content,
+                chunk_index=i,
                 start_char=start_char,
                 end_char=end_char,
-                embedding=embedding_array,
                 # Copy essential metadata from document - FIX FOR USER_ID BUG
-                user_id=document.user_id,
                 meeting_id=document.meeting_id,
                 project_id=document.project_id,
                 date=document.date,
@@ -1479,6 +1477,8 @@ Examples:
             logger.info("[STEPC] Applying user-provided filters...")
             original_filters = dict(search_filters)  # Keep copy for comparison
             
+            if document_ids:
+                search_filters['document_ids'] = document_ids
             if meeting_ids:
                 search_filters['meeting_ids'] = meeting_ids
             if project_id:
@@ -1699,7 +1699,9 @@ Examples:
                     pass
             
             # Extract meetings and dates
-            if hasattr(chunk, 'filename') and chunk.filename:
+            if hasattr(chunk, 'document_title') and chunk.document_title:
+                meetings.add(chunk.document_title)
+            elif hasattr(chunk, 'filename') and chunk.filename:
                 meetings.add(chunk.filename)
             
             if hasattr(chunk, 'date') and chunk.date:
@@ -1835,7 +1837,7 @@ Examples:
                     metadata['actions'] = []
             
             # Collect context information
-            document_title = context.get('document_title', chunk.filename)
+            document_title = context.get('document_title', getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document')))
             document_date = context.get('document_date', 'Unknown date')
             
             context_part = f"**From {document_title} ({document_date})**\n"
@@ -2085,7 +2087,7 @@ Examples:
                 if current_doc is not None:
                     context_parts.append("\n" + "="*60 + "\n")
                 
-                context_parts.append(f"Document: {chunk.filename}")
+                context_parts.append(f"Document: {getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document'))}")
                 current_doc = chunk.document_id
             
             # Add content without chunk numbering
@@ -2207,75 +2209,17 @@ Return exactly 4-5 questions, each on a new line, without numbers or bullet poin
             ]
     
     def get_meeting_statistics(self) -> Dict[str, Any]:
-        """Get simplified statistics about processed meetings (excluding soft-deleted)"""
+        """Get simplified statistics about processed meetings using PostgreSQL"""
         try:
-            conn = sqlite3.connect(self.vector_db.db_path)
-            cursor = conn.cursor()
-            
-            # Get ACTIVE document counts only (exclude soft-deleted)
-            cursor.execute("""
-                SELECT COUNT(*) FROM documents 
-                WHERE is_deleted = FALSE OR is_deleted IS NULL
-            """)
-            total_docs = cursor.fetchone()[0]
-            
-            if total_docs == 0:
-                return {"error": "No documents processed"}
-            
-            # Get date range from ACTIVE meeting dates in filenames
-            cursor.execute("""
-                SELECT filename FROM documents 
-                WHERE is_deleted = FALSE OR is_deleted IS NULL
-            """)
-            filenames = cursor.fetchall()
-            
-            meeting_dates = []
-            for (filename,) in filenames:
-                # Extract date from filename format: Document_Fulfillment_AIML-20250714_153021-Meeting_Recording.docx
-                date_match = re.search(r'-(\d{8})_', filename)
-                if date_match:
-                    date_str = date_match.group(1)  # e.g., "20250714"
-                    # Convert to readable format: YYYY-MM-DD
-                    formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-                    meeting_dates.append(formatted_date)
-            
-            if meeting_dates:
-                meeting_dates.sort()
-                date_range = (meeting_dates[0], meeting_dates[-1])
+            # Use the PostgreSQL manager to get statistics
+            if hasattr(self, 'db_manager') and self.db_manager:
+                return self.db_manager.get_statistics()
             else:
-                # Fallback to processing dates if no meeting dates found (active only)
-                cursor.execute("""
-                    SELECT MIN(date), MAX(date) FROM documents 
-                    WHERE is_deleted = FALSE OR is_deleted IS NULL
-                """)
-                date_range = cursor.fetchone()
-            
-            # Get ACTIVE chunk statistics only (exclude soft-deleted)
-            cursor.execute("""
-                SELECT COUNT(*), AVG(LENGTH(content)) FROM chunks 
-                WHERE is_deleted = FALSE OR is_deleted IS NULL
-            """)
-            chunk_stats = cursor.fetchone()
-            
-            # Get monthly distribution (optional - can keep for internal tracking)
-            cursor.execute("SELECT strftime('%Y-%m', date) as month, COUNT(*) FROM documents GROUP BY month ORDER BY month")
-            monthly_counts = dict(cursor.fetchall())
-            
-            conn.close()
-            
-            stats = {
-                "total_meetings": total_docs,
-                "total_chunks": chunk_stats[0] if chunk_stats[0] else 0,
-                "average_chunk_length": int(chunk_stats[1]) if chunk_stats[1] else 0,
-                "vector_index_size": self.vector_db.index.ntotal if self.vector_db.index else 0,
-                "date_range": {
-                    "earliest": date_range[0] if date_range[0] else "N/A",
-                    "latest": date_range[1] if date_range[1] else "N/A"
-                },
-                "meetings_per_month": monthly_counts
-            }
-            
-            return stats
+                # Fallback: Try to import and use PostgresManager directly
+                from src.database.postgres_manager import PostgresManager
+                db_manager = PostgresManager()
+                return db_manager.get_statistics()
+                
         except Exception as e:
             logger.error(f"Error generating statistics: {e}")
             return {"error": f"Failed to generate statistics: {e}"}

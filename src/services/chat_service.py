@@ -258,7 +258,11 @@ class ChatService:
             # Validate document access (if needed)
             if document_ids:
                 user_documents = self.db_manager.get_all_documents(user_id)
-                user_doc_ids = [doc.document_id for doc in user_documents]
+                # Handle both dict and object formats for compatibility
+                if user_documents and isinstance(user_documents[0], dict):
+                    user_doc_ids = [doc['document_id'] for doc in user_documents]
+                else:
+                    user_doc_ids = [doc.document_id for doc in user_documents]
                 for doc_id in document_ids:
                     if doc_id not in user_doc_ids:
                         return False, f'Invalid document selection: {doc_id}'

@@ -15,11 +15,14 @@ import hashlib
 import uuid
 from contextlib import contextmanager
 
-# Get the AI clients and data classes from meeting_processor
+# Get the AI clients and legacy models from meeting_processor
 from meeting_processor import (
     access_token, embedding_model, llm,
-    DocumentChunk, User, Project, Meeting, MeetingDocument
+    User, Project, Meeting, MeetingDocument
 )
+
+# Import the correct DocumentChunk model from src.models.document
+from src.models.document import DocumentChunk
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,7 @@ class PostgresManager:
         # Initialize database schema
         self._ensure_database_exists()
         self._initialize_schema()
+        self._run_migrations()
         
         logger.info(f"PostgresManager initialized for database '{database}' with {vector_dimension}d vectors")
     
@@ -194,6 +198,9 @@ class PostgresManager:
                         processing_status VARCHAR(50) DEFAULT 'pending',
                         chunk_count INTEGER DEFAULT 0,
                         
+                        -- Folder organization (for # functionality)
+                        folder_path TEXT,
+                        
                         -- Soft deletion support
                         is_deleted BOOLEAN DEFAULT FALSE,
                         deleted_at TIMESTAMP,
@@ -302,6 +309,40 @@ class PostgresManager:
             logger.error(f"Error initializing schema: {e}")
             raise
     
+    def _run_migrations(self):
+        """Run database migrations for schema updates"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Check if folder_path column exists in documents table
+                cursor.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'documents' AND column_name = 'folder_path';
+                """)
+                
+                if not cursor.fetchone():
+                    logger.info("Adding folder_path column to documents table...")
+                    cursor.execute("ALTER TABLE documents ADD COLUMN folder_path TEXT;")
+                    
+                    # Update existing documents with a default folder path based on project
+                    cursor.execute("""
+                        UPDATE documents 
+                        SET folder_path = CASE 
+                            WHEN project_id IS NOT NULL THEN 'user_folder/project_' || project_id
+                            ELSE 'user_folder/default_project'
+                        END
+                        WHERE folder_path IS NULL;
+                    """)
+                    
+                    logger.info("folder_path column added and existing documents updated")
+                
+                conn.commit()
+                logger.info("Database migrations completed successfully")
+                
+        except Exception as e:
+            logger.error(f"Error running migrations: {e}")
+            # Don't raise - migrations are optional
+    
     # Document Operations
     def add_document(self, document, chunks: List):
         """Add a document and all its chunks to the database"""
@@ -315,8 +356,8 @@ class PostgresManager:
                         document_id, user_id, project_id, meeting_id, filename, original_filename,
                         file_path, file_size, file_hash, content_type,
                         content_summary, main_topics, participants, key_decisions, action_items,
-                        processing_status, chunk_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                        processing_status, chunk_count, folder_path
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """, (
                     document_id, document.user_id, document.project_id, document.meeting_id,
                     document.filename, getattr(document, 'original_filename', document.filename),
@@ -324,7 +365,8 @@ class PostgresManager:
                     getattr(document, 'file_hash', ''), getattr(document, 'content_type', ''),
                     getattr(document, 'content_summary', ''), getattr(document, 'main_topics', ''),
                     getattr(document, 'participants', ''), getattr(document, 'key_decisions', ''),
-                    getattr(document, 'action_items', ''), 'completed', len(chunks)
+                    getattr(document, 'action_items', ''), 'completed', len(chunks),
+                    getattr(document, 'folder_path', None)
                 ))
                 
                 # Prepare chunk data for batch insert
@@ -424,12 +466,11 @@ class PostgresManager:
                     chunk = DocumentChunk(
                         chunk_id=row['chunk_id'],
                         document_id=row['document_id'],
-                        filename=row['filename'],
-                        chunk_index=row['chunk_index'],
+                        user_id=row['user_id'],
                         content=row['content'],
+                        chunk_index=row['chunk_index'],
                         start_char=row['start_char'] or 0,
-                        end_char=row['end_char'] or len(row['content']),
-                        user_id=row['user_id']
+                        end_char=row['end_char'] or len(row['content'])
                     )
                     
                     # Add metadata
@@ -475,6 +516,13 @@ class PostgresManager:
                 
                 # Apply filters
                 if filters:
+                    if filters.get('document_ids'):
+                        document_ids = filters['document_ids']
+                        if document_ids:
+                            placeholders = ', '.join(['%s'] * len(document_ids))
+                            base_query += f" AND c.document_id IN ({placeholders})"
+                            params.extend(document_ids)
+                    
                     if filters.get('project_id'):
                         base_query += " AND c.project_id = %s"
                         params.append(filters['project_id'])
@@ -482,6 +530,13 @@ class PostgresManager:
                     if filters.get('meeting_id'):
                         base_query += " AND c.meeting_id = %s"
                         params.append(filters['meeting_id'])
+                    
+                    if filters.get('meeting_ids'):
+                        meeting_ids = filters['meeting_ids']
+                        if meeting_ids:
+                            placeholders = ', '.join(['%s'] * len(meeting_ids))
+                            base_query += f" AND c.meeting_id IN ({placeholders})"
+                            params.extend(meeting_ids)
                     
                     if filters.get('date_range'):
                         start_date, end_date = filters['date_range']
@@ -517,12 +572,11 @@ class PostgresManager:
                     chunk = DocumentChunk(
                         chunk_id=row['chunk_id'],
                         document_id=None,  # Not needed for display
-                        filename=row['filename'],
-                        chunk_index=row['chunk_index'],
+                        user_id=user_id,
                         content=row['content'],
+                        chunk_index=row['chunk_index'],
                         start_char=0,  # Default value for search results
-                        end_char=len(row['content']),  # End of chunk content
-                        user_id=user_id
+                        end_char=len(row['content'])  # End of chunk content
                     )
                     
                     # Add metadata
@@ -1061,16 +1115,24 @@ class PostgresManager:
             }
     
     def store_document_metadata(self, filename: str, content: str, user_id: str, 
-                              project_id: str = None, meeting_id: str = None) -> str:
+                              project_id: str = None, meeting_id: str = None, 
+                              folder_path: str = None) -> str:
         """Store document metadata and return document_id"""
         try:
+            # Generate folder_path if not provided
+            if folder_path is None:
+                if project_id:
+                    folder_path = f"user_folder/project_{project_id}"
+                else:
+                    folder_path = "user_folder/default_project"
+            
             with self.get_cursor() as (conn, cursor):
                 # Generate document_id since we're using VARCHAR instead of UUID with auto-generation
                 document_id = str(uuid.uuid4())
                 cursor.execute("""
-                    INSERT INTO documents (document_id, user_id, project_id, meeting_id, filename, processing_status)
-                    VALUES (%s, %s, %s, %s, %s, %s);
-                """, (document_id, user_id, project_id, meeting_id, filename, 'pending'))
+                    INSERT INTO documents (document_id, user_id, project_id, meeting_id, filename, processing_status, folder_path)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (document_id, user_id, project_id, meeting_id, filename, 'pending', folder_path))
                 
                 conn.commit()
                 
@@ -1120,15 +1182,110 @@ class PostgresManager:
             logger.error(f"Error getting project documents: {e}")
             return []
 
+    def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single document by ID"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT 
+                        d.document_id, d.user_id, d.project_id, d.meeting_id, d.filename, 
+                        d.original_filename, d.content_summary, d.main_topics, d.participants,
+                        d.key_decisions, d.action_items, d.upload_date, d.file_size, d.chunk_count,
+                        p.project_name, m.meeting_name
+                    FROM documents d
+                    LEFT JOIN projects p ON d.project_id = p.project_id
+                    LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
+                    WHERE d.document_id = %s AND d.is_deleted = FALSE;
+                """, (document_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'document_id': str(row['document_id']),
+                        'user_id': str(row['user_id']),
+                        'project_id': str(row['project_id']) if row['project_id'] else None,
+                        'meeting_id': str(row['meeting_id']) if row['meeting_id'] else None,
+                        'filename': row['filename'],
+                        'original_filename': row['original_filename'],
+                        'content_summary': row['content_summary'],
+                        'main_topics': row['main_topics'],
+                        'participants': row['participants'],
+                        'key_decisions': row['key_decisions'],
+                        'action_items': row['action_items'],
+                        'upload_date': row['upload_date'].isoformat() if row['upload_date'] else '',
+                        'file_size': row['file_size'],
+                        'chunk_count': row['chunk_count'],
+                        'project_name': row['project_name'],
+                        'meeting_name': row['meeting_name']
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting document by ID {document_id}: {e}")
+            return None
+
+    def get_document_chunks(self, document_id: str, user_id: str = None):
+        """
+        Get all chunks for a specific document
+        
+        Args:
+            document_id: Document ID
+            user_id: User ID (optional, will be fetched from document if not provided)
+            
+        Returns:
+            List of DocumentChunk objects for the document
+        """
+        try:
+            # Get user_id from document if not provided
+            if user_id is None:
+                document = self.get_document_by_id(document_id)
+                if not document:
+                    logger.error(f"Document {document_id} not found")
+                    return []
+                user_id = document.get('user_id')
+                if not user_id:
+                    logger.error(f"User ID not found for document {document_id}")
+                    return []
+            
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    SELECT chunk_id, content, chunk_index, start_char, end_char, embedding
+                    FROM document_chunks 
+                    WHERE document_id = %s 
+                    ORDER BY chunk_index;
+                """, (document_id,))
+                
+                rows = cursor.fetchall()
+                chunks = []
+                
+                for row in rows:
+                    # Create DocumentChunk object using the class structure
+                    chunk = DocumentChunk(
+                        chunk_id=str(row[0]),
+                        document_id=document_id,
+                        user_id=user_id,
+                        content=row[1],
+                        chunk_index=row[2],
+                        start_char=row[3],
+                        end_char=row[4]
+                    )
+                    chunks.append(chunk)
+                
+                return chunks
+                
+        except Exception as e:
+            logger.error(f"Error getting chunks for document {document_id}: {e}")
+            return []
+
     def get_all_documents(self, user_id: str = None) -> List[Dict[str, Any]]:
         """Get all documents with metadata"""
         try:
             with self.get_cursor(dict_cursor=True) as (conn, cursor):
                 base_query = """
                     SELECT 
-                        d.document_id, d.filename, d.original_filename, d.content_summary,
-                        d.upload_date, d.file_size, d.chunk_count,
-                        p.project_name, m.meeting_name
+                        d.document_id, d.user_id, d.project_id, d.meeting_id, d.filename, 
+                        d.original_filename, d.content_summary, d.upload_date, d.file_size, 
+                        d.chunk_count, d.folder_path, p.project_name, m.meeting_name
                     FROM documents d
                     LEFT JOIN projects p ON d.project_id = p.project_id
                     LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
@@ -1149,12 +1306,16 @@ class PostgresManager:
                 for row in rows:
                     doc = {
                         'document_id': str(row['document_id']),
+                        'user_id': str(row['user_id']),
+                        'project_id': str(row['project_id']) if row['project_id'] else None,
+                        'meeting_id': str(row['meeting_id']) if row['meeting_id'] else None,
                         'filename': row['filename'],
                         'original_filename': row['original_filename'],
                         'content_summary': row['content_summary'],
                         'upload_date': row['upload_date'].isoformat() if row['upload_date'] else '',
                         'file_size': row['file_size'],
                         'chunk_count': row['chunk_count'],
+                        'folder_path': row['folder_path'],
                         'project_name': row['project_name'],
                         'meeting_name': row['meeting_name']
                     }
@@ -1164,4 +1325,121 @@ class PostgresManager:
                 
         except Exception as e:
             logger.error(f"Error getting documents: {e}")
+            return []
+
+    # ===============================================
+    # FOLDER-BASED SEARCH METHODS (for # functionality)
+    # ===============================================
+    
+    def search_similar_chunks_by_folder(self, query_embedding: np.ndarray, user_id: str, 
+                                      folder_path: str, top_k: int = 20) -> List[Tuple[str, float]]:
+        """
+        Search for similar chunks using pgvector, filtered by folder path
+        
+        Args:
+            query_embedding: Query vector
+            user_id: User ID for filtering
+            folder_path: Folder path for filtering
+            top_k: Number of top results to return
+            
+        Returns:
+            List of (chunk_id, similarity_score) tuples
+        """
+        try:
+            # Convert query embedding to proper format for pgvector
+            query_vector = query_embedding.tolist()
+            
+            with self.get_cursor() as (conn, cursor):
+                # Search for similar chunks in documents with matching folder_path
+                cursor.execute("""
+                    SELECT 
+                        dc.chunk_id,
+                        1 - (dc.embedding <=> %s::vector) as similarity
+                    FROM document_chunks dc
+                    JOIN documents d ON dc.document_id = d.document_id
+                    WHERE d.user_id = %s 
+                      AND d.folder_path = %s 
+                      AND d.is_deleted = FALSE
+                    ORDER BY dc.embedding <=> %s::vector
+                    LIMIT %s;
+                """, (query_vector, user_id, folder_path, query_vector, top_k))
+                
+                results = cursor.fetchall()
+                return [(str(row[0]), float(row[1])) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Error searching similar chunks by folder: {e}")
+            return []
+    
+    def keyword_search_chunks_by_folder(self, keywords: List[str], user_id: str, 
+                                      folder_path: str, top_k: int = 20) -> List[str]:
+        """
+        Search for chunks containing keywords, filtered by folder path
+        
+        Args:
+            keywords: List of keywords to search for
+            user_id: User ID for filtering
+            folder_path: Folder path for filtering
+            top_k: Number of top results to return
+            
+        Returns:
+            List of chunk_ids
+        """
+        try:
+            if not keywords:
+                return []
+            
+            # Create search query for full-text search
+            search_terms = ' & '.join(keywords)
+            
+            with self.get_cursor() as (conn, cursor):
+                # Search for chunks containing keywords in documents with matching folder_path
+                cursor.execute("""
+                    SELECT 
+                        dc.chunk_id,
+                        ts_rank(to_tsvector('english', dc.content), plainto_tsquery('english', %s)) as rank
+                    FROM document_chunks dc
+                    JOIN documents d ON dc.document_id = d.document_id
+                    WHERE d.user_id = %s 
+                      AND d.folder_path = %s 
+                      AND d.is_deleted = FALSE
+                      AND to_tsvector('english', dc.content) @@ plainto_tsquery('english', %s)
+                    ORDER BY rank DESC
+                    LIMIT %s;
+                """, (search_terms, user_id, folder_path, search_terms, top_k))
+                
+                results = cursor.fetchall()
+                return [str(row[0]) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Error keyword searching chunks by folder: {e}")
+            return []
+    
+    def get_user_documents_by_folder(self, user_id: str, folder_path: str) -> List[str]:
+        """
+        Get all document IDs for a user in a specific folder path
+        
+        Args:
+            user_id: User ID for filtering
+            folder_path: Folder path for filtering
+            
+        Returns:
+            List of document_ids
+        """
+        try:
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    SELECT document_id
+                    FROM documents
+                    WHERE user_id = %s 
+                      AND folder_path = %s 
+                      AND is_deleted = FALSE
+                    ORDER BY upload_date DESC;
+                """, (user_id, folder_path))
+                
+                results = cursor.fetchall()
+                return [str(row[0]) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Error getting user documents by folder: {e}")
             return []

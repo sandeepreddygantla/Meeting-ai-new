@@ -238,26 +238,28 @@ class DocumentService:
         
         for file in files:
             if file and file.filename:
-                filename = secure_filename(file.filename)
+                original_filename = file.filename  # Keep original filename with spaces for @ functionality
+                secure_filename_str = secure_filename(file.filename)  # Secure version for filesystem
                 
-                # Validate file extension
-                if not filename.lower().endswith(('.docx', '.txt', '.pdf')):
+                # Validate file extension using original filename
+                if not original_filename.lower().endswith(('.docx', '.txt', '.pdf')):
                     validation_errors.append({
-                        'filename': filename,
+                        'filename': original_filename,
                         'error': 'Unsupported file format'
                     })
                     continue
                 
-                # Save file to permanent location
-                file_path = os.path.join(upload_folder, filename)
+                # Save file to permanent location using secure filename
+                file_path = os.path.join(upload_folder, secure_filename_str)
                 
-                # Handle duplicate filenames in filesystem
+                # Handle duplicate filenames in filesystem (affects only secure filename for storage)
                 counter = 1
                 original_file_path = file_path
+                final_secure_filename = secure_filename_str
                 while os.path.exists(file_path):
                     name, ext = os.path.splitext(original_file_path)
                     file_path = f"{name}_{counter}{ext}"
-                    filename = os.path.basename(file_path)
+                    final_secure_filename = os.path.basename(file_path)
                     counter += 1
                 
                 # Save file
@@ -265,7 +267,7 @@ class DocumentService:
                     file.save(file_path)
                 except Exception as e:
                     validation_errors.append({
-                        'filename': filename,
+                        'filename': original_filename,
                         'error': f'File save error: {str(e)}'
                     })
                     continue
@@ -273,7 +275,7 @@ class DocumentService:
                 # Check for content duplicates
                 try:
                     file_hash = self.db_manager.calculate_file_hash(file_path)
-                    duplicate_info = self.db_manager.is_file_duplicate(file_hash, filename, user_id)
+                    duplicate_info = self.db_manager.is_file_duplicate(file_hash, original_filename, user_id)
                     
                     if duplicate_info:
                         duplicate_type = duplicate_info.get('duplicate_type', 'active')
@@ -281,7 +283,7 @@ class DocumentService:
                         if duplicate_type == 'active':
                             # Regular duplicate - block upload
                             duplicates.append({
-                                'filename': filename,
+                                'filename': original_filename,
                                 'original_filename': duplicate_info['original_filename'],
                                 'created_at': duplicate_info['created_at'],
                                 'action': 'blocked'
@@ -291,7 +293,7 @@ class DocumentService:
                         
                         elif duplicate_type == 'soft_deleted_restorable':
                             # Smart restore - automatically restore the soft-deleted document
-                            logger.info(f"Restoring soft-deleted document {duplicate_info['document_id']} for re-uploaded file {filename}")
+                            logger.info(f"Restoring soft-deleted document {duplicate_info['document_id']} for re-uploaded file {original_filename}")
                             
                             restore_success = self.db_manager.undelete_document(
                                 duplicate_info['document_id'], user_id
@@ -299,7 +301,7 @@ class DocumentService:
                             
                             if restore_success['success']:
                                 duplicates.append({
-                                    'filename': filename,
+                                    'filename': original_filename,
                                     'original_filename': duplicate_info['original_filename'], 
                                     'created_at': duplicate_info['created_at'],
                                     'deleted_at': duplicate_info.get('deleted_at'),
@@ -312,7 +314,7 @@ class DocumentService:
                                 # Restore failed - treat as regular duplicate
                                 logger.warning(f"Failed to restore document {duplicate_info['document_id']}, treating as regular duplicate")
                                 duplicates.append({
-                                    'filename': filename,
+                                    'filename': original_filename,
                                     'original_filename': duplicate_info['original_filename'],
                                     'created_at': duplicate_info['created_at'],
                                     'action': 'blocked_restore_failed'
@@ -321,9 +323,9 @@ class DocumentService:
                                 continue
                         
                 except Exception as e:
-                    logger.error(f"Error checking duplicate for {filename}: {e}")
+                    logger.error(f"Error checking duplicate for {original_filename}: {e}")
                     validation_errors.append({
-                        'filename': filename,
+                        'filename': original_filename,
                         'error': f'Error processing file: {str(e)}'
                     })
                     if os.path.exists(file_path):
@@ -332,7 +334,7 @@ class DocumentService:
                 
                 file_list.append({
                     'path': file_path,
-                    'filename': filename
+                    'filename': original_filename  # Use original filename for database storage
                 })
         
         return file_list, validation_errors, duplicates
