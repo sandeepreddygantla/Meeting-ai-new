@@ -15,7 +15,12 @@ from src.config.database import setup_database_session, ensure_directories_exist
 from src.ai.llm_client import initialize_ai_clients
 
 # Import database manager
-from src.database.manager import DatabaseManager
+try:
+    from src.database.postgres_manager import PostgresManager
+    USE_POSTGRES = True
+except ImportError:
+    from src.database.manager import DatabaseManager
+    USE_POSTGRES = False
 
 # Import services
 from src.services.auth_service import AuthService
@@ -97,8 +102,23 @@ def initialize_services():
             # Continue anyway - some functionality may be limited
         
         # Initialize database manager
-        db_manager = DatabaseManager()
-        logger.info("Database manager initialized")
+        if USE_POSTGRES:
+            # Use PostgreSQL + pgvector
+            logger.info("Initializing PostgreSQL + pgvector database manager...")
+            db_manager = PostgresManager(
+                host="localhost",
+                database="meetingsai",
+                user="postgres", 
+                password="Sandeep@0904",
+                port=5432,
+                vector_dimension=1536
+            )
+            logger.info("PostgreSQL + pgvector database manager initialized successfully")
+        else:
+            # Fallback to SQLite + FAISS
+            logger.info("Initializing SQLite + FAISS database manager...")
+            db_manager = DatabaseManager()
+            logger.info("SQLite + FAISS database manager initialized successfully")
         
         # Set up the document processor - reuse the same db connection
         if EnhancedMeetingDocumentProcessor:
@@ -267,6 +287,6 @@ if __name__ == '__main__':
     app = get_application()
     if app:
         logger.info(f"Starting development server with base path: {BASE_PATH}")
-        app.run(debug=True)
+        app.run(debug=False, host='0.0.0.0')
     else:
         logger.error("Failed to get application instance")

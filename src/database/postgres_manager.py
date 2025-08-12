@@ -1,0 +1,1167 @@
+"""
+PostgreSQL + pgvector Database Manager
+Production-ready replacement for the current SQLite + FAISS setup
+"""
+
+import logging
+import psycopg2
+from psycopg2.extras import execute_values, RealDictCursor
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple, Union
+from datetime import datetime, timedelta
+import os
+import json
+import hashlib
+import uuid
+from contextlib import contextmanager
+
+# Get the AI clients and data classes from meeting_processor
+from meeting_processor import (
+    access_token, embedding_model, llm,
+    DocumentChunk, User, Project, Meeting, MeetingDocument
+)
+
+logger = logging.getLogger(__name__)
+
+class PostgresManager:
+    """
+    Production PostgreSQL + pgvector database manager for Meeting AI.
+    Replaces the current SQLite + FAISS dual-database approach.
+    """
+    
+    def __init__(self, 
+                 host: str = "localhost",
+                 database: str = "meetingsai", 
+                 user: str = "postgres",
+                 password: str = "Sandeep@0904",
+                 port: int = 5432,
+                 vector_dimension: int = 1536):
+        """
+        Initialize PostgreSQL connection and setup.
+        
+        Args:
+            host: PostgreSQL host
+            database: Database name
+            user: Database user
+            password: Database password
+            port: Database port
+            vector_dimension: Vector embedding dimension
+        """
+        self.db_config = {
+            'host': host,
+            'database': database,
+            'user': user,
+            'password': password,
+            'port': port
+        }
+        self.vector_dimension = vector_dimension
+        self._connection_pool = None
+        
+        # Add db_path property for compatibility with existing code
+        self.db_path = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        
+        # Initialize database schema
+        self._ensure_database_exists()
+        self._initialize_schema()
+        
+        logger.info(f"PostgresManager initialized for database '{database}' with {vector_dimension}d vectors")
+    
+    @contextmanager
+    def get_connection(self):
+        """Get a database connection with automatic cleanup"""
+        conn = None
+        try:
+            conn = psycopg2.connect(**self.db_config)
+            yield conn
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Database connection error: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+    
+    @contextmanager
+    def get_cursor(self, dict_cursor=False):
+        """Get a database cursor with automatic cleanup"""
+        with self.get_connection() as conn:
+            cursor_factory = RealDictCursor if dict_cursor else None
+            cursor = conn.cursor(cursor_factory=cursor_factory)
+            try:
+                yield conn, cursor
+            finally:
+                cursor.close()
+    
+    def _ensure_database_exists(self):
+        """Ensure the target database exists, create if not"""
+        try:
+            # Connect to default postgres database first
+            temp_config = self.db_config.copy()
+            temp_config['database'] = 'postgres'
+            
+            with psycopg2.connect(**temp_config) as conn:
+                conn.autocommit = True
+                with conn.cursor() as cursor:
+                    # Check if database exists
+                    cursor.execute(
+                        "SELECT 1 FROM pg_database WHERE datname = %s;",
+                        (self.db_config['database'],)
+                    )
+                    
+                    if not cursor.fetchone():
+                        # Create database
+                        cursor.execute(
+                            f"CREATE DATABASE {self.db_config['database']};"
+                        )
+                        logger.info(f"Created database '{self.db_config['database']}'")
+                    else:
+                        logger.info(f"Database '{self.db_config['database']}' already exists")
+                        
+        except Exception as e:
+            logger.error(f"Error ensuring database exists: {e}")
+            # Continue anyway - database might exist but connection failed
+    
+    def _initialize_schema(self):
+        """Initialize database schema with all required tables and indexes"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Enable pgvector extension
+                cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                
+                # Users table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id VARCHAR(255) PRIMARY KEY,
+                        username VARCHAR(100) UNIQUE NOT NULL,
+                        email VARCHAR(255) UNIQUE NOT NULL,
+                        full_name VARCHAR(255),
+                        password_hash TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_login TIMESTAMP,
+                        is_active BOOLEAN DEFAULT TRUE
+                    );
+                """)
+                
+                # Projects table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS projects (
+                        project_id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        project_name VARCHAR(255) NOT NULL,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, project_name)
+                    );
+                """)
+                
+                # Meetings table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS meetings (
+                        meeting_id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        project_id VARCHAR(255) REFERENCES projects(project_id) ON DELETE SET NULL,
+                        meeting_name VARCHAR(255) NOT NULL,
+                        meeting_date TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
+                # Documents table
+                cursor.execute(f"""
+                    CREATE TABLE IF NOT EXISTS documents (
+                        document_id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        project_id VARCHAR(255) REFERENCES projects(project_id) ON DELETE SET NULL,
+                        meeting_id VARCHAR(255) REFERENCES meetings(meeting_id) ON DELETE SET NULL,
+                        filename VARCHAR(255) NOT NULL,
+                        original_filename VARCHAR(255),
+                        file_path TEXT,
+                        file_size BIGINT,
+                        file_hash VARCHAR(64),
+                        content_type VARCHAR(100),
+                        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        processed_date TIMESTAMP,
+                        
+                        -- AI-extracted metadata
+                        content_summary TEXT,
+                        main_topics TEXT,
+                        participants TEXT,
+                        key_decisions TEXT,
+                        action_items TEXT,
+                        
+                        -- Processing status
+                        processing_status VARCHAR(50) DEFAULT 'pending',
+                        chunk_count INTEGER DEFAULT 0,
+                        
+                        -- Soft deletion support
+                        is_deleted BOOLEAN DEFAULT FALSE,
+                        deleted_at TIMESTAMP,
+                        deleted_by VARCHAR(255) REFERENCES users(user_id)
+                    );
+                """)
+                
+                # Document chunks table with pgvector support
+                cursor.execute(f"""
+                    CREATE TABLE IF NOT EXISTS document_chunks (
+                        chunk_id VARCHAR(255) PRIMARY KEY,
+                        document_id VARCHAR(255) NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        project_id VARCHAR(255) REFERENCES projects(project_id) ON DELETE SET NULL,
+                        meeting_id VARCHAR(255) REFERENCES meetings(meeting_id) ON DELETE SET NULL,
+                        
+                        -- Chunk content and position
+                        content TEXT NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        start_char INTEGER,
+                        end_char INTEGER,
+                        
+                        -- Vector embedding (pgvector)
+                        embedding VECTOR({self.vector_dimension}),
+                        
+                        -- Timestamps
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        
+                        -- Indexing for performance
+                        UNIQUE(document_id, chunk_index)
+                    );
+                """)
+                
+                # Sessions table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        expires_at TIMESTAMP NOT NULL,
+                        is_active BOOLEAN DEFAULT TRUE
+                    );
+                """)
+                
+                # File hashes table for deduplication
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS file_hashes (
+                        hash_id VARCHAR(255) PRIMARY KEY,
+                        file_hash VARCHAR(64) NOT NULL,
+                        filename VARCHAR(255) NOT NULL,
+                        original_filename VARCHAR(255),
+                        file_size BIGINT,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id),
+                        project_id VARCHAR(255) REFERENCES projects(project_id),
+                        meeting_id VARCHAR(255) REFERENCES meetings(meeting_id),
+                        document_id VARCHAR(255) REFERENCES documents(document_id),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(file_hash, filename, user_id)
+                    );
+                """)
+                
+                # Upload jobs table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS upload_jobs (
+                        job_id VARCHAR(255) PRIMARY KEY,
+                        user_id VARCHAR(255) NOT NULL REFERENCES users(user_id),
+                        project_id VARCHAR(255) REFERENCES projects(project_id),
+                        meeting_id VARCHAR(255) REFERENCES meetings(meeting_id),
+                        total_files INTEGER NOT NULL,
+                        processed_files INTEGER DEFAULT 0,
+                        failed_files INTEGER DEFAULT 0,
+                        status VARCHAR(50) DEFAULT 'pending',
+                        error_message TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                
+                # Create indexes for performance
+                indexes = [
+                    "CREATE INDEX IF NOT EXISTS idx_docs_user_id ON documents(user_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_docs_project_id ON documents(project_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_docs_upload_date ON documents(upload_date);",
+                    "CREATE INDEX IF NOT EXISTS idx_docs_file_hash ON documents(file_hash);",
+                    "CREATE INDEX IF NOT EXISTS idx_docs_is_deleted ON documents(is_deleted);",
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON document_chunks(document_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_user_id ON document_chunks(user_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_chunks_project_id ON document_chunks(project_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);",
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);",
+                    # Vector index for similarity search
+                    f"CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);"
+                ]
+                
+                for index_sql in indexes:
+                    try:
+                        cursor.execute(index_sql)
+                    except Exception as e:
+                        logger.warning(f"Index creation warning: {e}")
+                        # Continue with other indexes
+                
+                conn.commit()
+                logger.info("Database schema initialized successfully")
+                
+        except Exception as e:
+            logger.error(f"Error initializing schema: {e}")
+            raise
+    
+    # Document Operations
+    def add_document(self, document, chunks: List):
+        """Add a document and all its chunks to the database"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Insert document metadata
+                # Generate document_id since we're using VARCHAR instead of UUID with auto-generation
+                document_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO documents (
+                        document_id, user_id, project_id, meeting_id, filename, original_filename,
+                        file_path, file_size, file_hash, content_type,
+                        content_summary, main_topics, participants, key_decisions, action_items,
+                        processing_status, chunk_count
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """, (
+                    document_id, document.user_id, document.project_id, document.meeting_id,
+                    document.filename, getattr(document, 'original_filename', document.filename),
+                    getattr(document, 'file_path', ''), getattr(document, 'file_size', 0),
+                    getattr(document, 'file_hash', ''), getattr(document, 'content_type', ''),
+                    getattr(document, 'content_summary', ''), getattr(document, 'main_topics', ''),
+                    getattr(document, 'participants', ''), getattr(document, 'key_decisions', ''),
+                    getattr(document, 'action_items', ''), 'completed', len(chunks)
+                ))
+                
+                # Prepare chunk data for batch insert
+                chunk_data = []
+                for chunk in chunks:
+                    if chunk.embedding is not None:
+                        # Generate chunk_id since we're using VARCHAR instead of UUID with auto-generation
+                        chunk_id = str(uuid.uuid4())
+                        chunk_data.append((
+                            chunk_id, document_id, document.user_id, document.project_id, document.meeting_id,
+                            chunk.content, chunk.chunk_index, chunk.start_char, chunk.end_char,
+                            chunk.embedding.tolist() if isinstance(chunk.embedding, np.ndarray) else chunk.embedding
+                        ))
+                
+                # Batch insert chunks
+                if chunk_data:
+                    execute_values(
+                        cursor,
+                        """INSERT INTO document_chunks (
+                            chunk_id, document_id, user_id, project_id, meeting_id, content, 
+                            chunk_index, start_char, end_char, embedding
+                        ) VALUES %s""",
+                        chunk_data
+                    )
+                
+                conn.commit()
+                logger.info(f"Successfully added document {document.filename} with {len(chunks)} chunks")
+                
+        except Exception as e:
+            logger.error(f"Error adding document {document.filename}: {e}")
+            raise
+    
+    def search_similar_chunks(self, query_embedding: np.ndarray, user_id: str = None, top_k: int = 20) -> List[Tuple[str, float]]:
+        """Search for similar chunks using pgvector"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Convert embedding to list for PostgreSQL
+                embedding_list = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else query_embedding
+                
+                # Build query with optional user filtering
+                base_query = """
+                    SELECT 
+                        chunk_id,
+                        1 - (embedding <=> %s::vector) as similarity_score
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.document_id
+                    WHERE d.is_deleted = FALSE
+                """
+                
+                params = [embedding_list]
+                
+                if user_id:
+                    base_query += " AND c.user_id = %s"
+                    params.append(user_id)
+                
+                base_query += """
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s;
+                """
+                
+                params.extend([embedding_list, top_k])
+                
+                cursor.execute(base_query, params)
+                results = cursor.fetchall()
+                
+                return [(row[0], row[1]) for row in results]
+                
+        except Exception as e:
+            logger.error(f"Error in similarity search: {e}")
+            return []
+    
+    def get_chunks_by_ids(self, chunk_ids: List[str]):
+        """Retrieve chunks by their IDs"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT 
+                        c.*,
+                        d.filename,
+                        d.content_summary,
+                        d.upload_date,
+                        p.project_name,
+                        m.meeting_name
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.document_id
+                    LEFT JOIN projects p ON c.project_id = p.project_id
+                    LEFT JOIN meetings m ON c.meeting_id = m.meeting_id
+                    WHERE c.chunk_id = ANY(%s)
+                    ORDER BY d.upload_date DESC, c.chunk_index;
+                """, (chunk_ids,))
+                
+                rows = cursor.fetchall()
+                
+                # Convert to DocumentChunk objects
+                chunks = []
+                for row in rows:
+                    chunk = DocumentChunk(
+                        chunk_id=row['chunk_id'],
+                        document_id=row['document_id'],
+                        filename=row['filename'],
+                        chunk_index=row['chunk_index'],
+                        content=row['content'],
+                        start_char=row['start_char'] or 0,
+                        end_char=row['end_char'] or len(row['content']),
+                        user_id=row['user_id']
+                    )
+                    
+                    # Add metadata
+                    chunk.document_title = row['filename']
+                    chunk.content_summary = row['content_summary']
+                    chunk.project_id = row['project_id']
+                    chunk.meeting_id = row['meeting_id']
+                    
+                    chunks.append(chunk)
+                
+                return chunks
+                
+        except Exception as e:
+            logger.error(f"Error retrieving chunks: {e}")
+            return []
+    
+    def enhanced_search_with_metadata(self, query_embedding: np.ndarray, user_id: str, 
+                                    filters: Dict = None, top_k: int = 20) -> List[Dict]:
+        """Enhanced search combining vector similarity with metadata filtering"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                # Build dynamic query based on filters
+                base_query = """
+                    SELECT 
+                        c.chunk_id,
+                        c.content,
+                        c.chunk_index,
+                        d.filename,
+                        d.content_summary,
+                        d.upload_date,
+                        p.project_name,
+                        m.meeting_name,
+                        1 - (c.embedding <=> %s::vector) as similarity_score
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.document_id
+                    LEFT JOIN projects p ON c.project_id = p.project_id
+                    LEFT JOIN meetings m ON c.meeting_id = m.meeting_id
+                    WHERE d.is_deleted = FALSE AND c.user_id = %s
+                """
+                
+                embedding_list = query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else query_embedding
+                params = [embedding_list, user_id]
+                
+                # Apply filters
+                if filters:
+                    if filters.get('project_id'):
+                        base_query += " AND c.project_id = %s"
+                        params.append(filters['project_id'])
+                    
+                    if filters.get('meeting_id'):
+                        base_query += " AND c.meeting_id = %s"
+                        params.append(filters['meeting_id'])
+                    
+                    if filters.get('date_range'):
+                        start_date, end_date = filters['date_range']
+                        if start_date:
+                            base_query += " AND d.upload_date >= %s"
+                            params.append(start_date)
+                        if end_date:
+                            base_query += " AND d.upload_date <= %s"
+                            params.append(end_date)
+                    
+                    if filters.get('keywords'):
+                        keyword_conditions = []
+                        for keyword in filters['keywords']:
+                            keyword_conditions.append("c.content ILIKE %s")
+                            params.append(f"%{keyword}%")
+                        if keyword_conditions:
+                            base_query += f" AND ({' OR '.join(keyword_conditions)})"
+                
+                # Add ordering and limit
+                base_query += """
+                    ORDER BY c.embedding <=> %s::vector
+                    LIMIT %s;
+                """
+                params.extend([embedding_list, top_k])
+                
+                cursor.execute(base_query, params)
+                rows = cursor.fetchall()
+                
+                # Convert to enhanced results format
+                enhanced_results = []
+                for row in rows:
+                    # Create chunk object
+                    chunk = DocumentChunk(
+                        chunk_id=row['chunk_id'],
+                        document_id=None,  # Not needed for display
+                        filename=row['filename'],
+                        chunk_index=row['chunk_index'],
+                        content=row['content'],
+                        start_char=0,  # Default value for search results
+                        end_char=len(row['content']),  # End of chunk content
+                        user_id=user_id
+                    )
+                    
+                    # Add metadata
+                    chunk.document_title = row['filename']
+                    chunk.content_summary = row['content_summary']
+                    
+                    # Create result with context
+                    result = {
+                        'chunk': chunk,
+                        'similarity_score': float(row['similarity_score']),
+                        'context': {
+                            'document_title': row['filename'],
+                            'document_date': row['upload_date'].isoformat() if row['upload_date'] else '',
+                            'chunk_position': str(row['chunk_index'] + 1),
+                            'document_summary': row['content_summary'] or '',
+                            'project_name': row['project_name'] or '',
+                            'meeting_name': row['meeting_name'] or ''
+                        }
+                    }
+                    
+                    enhanced_results.append(result)
+                
+                logger.info(f"Enhanced search returned {len(enhanced_results)} results")
+                return enhanced_results
+                
+        except Exception as e:
+            logger.error(f"Error in enhanced search: {e}")
+            return []
+    
+    # User Management
+    def create_user(self, username: str, email: str, full_name: str, password_hash: str) -> str:
+        """Create a new user"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Generate user_id since we're using VARCHAR instead of UUID with auto-generation
+                user_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO users (user_id, username, email, full_name, password_hash)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING user_id;
+                """, (user_id, username, email, full_name, password_hash))
+                
+                user_id = cursor.fetchone()[0]
+                conn.commit()
+                
+                logger.info(f"Created user: {username}")
+                return str(user_id)
+                
+        except Exception as e:
+            logger.error(f"Error creating user: {e}")
+            raise
+    
+    def get_user_by_username(self, username: str):
+        """Get user by username"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT user_id, username, email, full_name, password_hash, created_at, last_login, is_active
+                    FROM users WHERE username = %s AND is_active = TRUE;
+                """, (username,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return User(
+                        user_id=str(row['user_id']),
+                        username=row['username'],
+                        email=row['email'],
+                        full_name=row['full_name'],
+                        password_hash=row['password_hash'],
+                        created_at=row['created_at'],
+                        last_login=row['last_login'],
+                        is_active=row['is_active']
+                    )
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting user by username: {e}")
+            return None
+    
+    def get_user_by_id(self, user_id: str):
+        """Get user by user_id"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT user_id, username, email, full_name, password_hash, created_at, last_login, is_active
+                    FROM users WHERE user_id = %s AND is_active = TRUE;
+                """, (user_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return User(
+                        user_id=str(row['user_id']),
+                        username=row['username'],
+                        email=row['email'],
+                        full_name=row['full_name'],
+                        password_hash=row['password_hash'],
+                        created_at=row['created_at'],
+                        last_login=row['last_login'],
+                        is_active=row['is_active']
+                    )
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting user by ID: {e}")
+            return None
+    
+    def update_user_last_login(self, user_id: str):
+        """Update user's last login timestamp"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    UPDATE users SET last_login = CURRENT_TIMESTAMP
+                    WHERE user_id = %s;
+                """, (user_id,))
+                
+                conn.commit()
+                logger.info(f"Updated last login for user: {user_id}")
+                
+        except Exception as e:
+            logger.error(f"Error updating user last login: {e}")
+    
+    # Project Management
+    def create_project(self, user_id: str, project_name: str, description: str = "") -> str:
+        """Create a new project for a user"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Generate project_id since we're using VARCHAR instead of UUID with auto-generation
+                project_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO projects (project_id, user_id, project_name, description)
+                    VALUES (%s, %s, %s, %s);
+                """, (project_id, user_id, project_name, description))
+                
+                conn.commit()
+                
+                logger.info(f"Created project: {project_name}")
+                return str(project_id)
+                
+        except Exception as e:
+            logger.error(f"Error creating project: {e}")
+            raise
+    
+    def get_user_projects(self, user_id: str):
+        """Get all projects for a user"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT project_id, project_name, description, created_at
+                    FROM projects 
+                    WHERE user_id = %s 
+                    ORDER BY created_at DESC;
+                """, (user_id,))
+                
+                rows = cursor.fetchall()
+                projects = []
+                for row in rows:
+                    project = Project(
+                        project_id=str(row['project_id']),
+                        user_id=user_id,
+                        project_name=row['project_name'],
+                        description=row['description'],
+                        created_at=row['created_at']
+                    )
+                    projects.append(project)
+                
+                return projects
+                
+        except Exception as e:
+            logger.error(f"Error getting user projects: {e}")
+            return []
+    
+    # Meeting Management
+    def create_meeting(self, user_id: str, project_id: str, meeting_name: str, meeting_date: datetime = None) -> str:
+        """Create a new meeting"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                meeting_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO meetings (meeting_id, user_id, project_id, meeting_name, meeting_date)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING meeting_id;
+                """, (meeting_id, user_id, project_id, meeting_name, meeting_date))
+                
+                meeting_id = cursor.fetchone()[0]
+                conn.commit()
+                
+                logger.info(f"Created meeting: {meeting_name}")
+                return str(meeting_id)
+                
+        except Exception as e:
+            logger.error(f"Error creating meeting: {e}")
+            raise
+    
+    def get_user_meetings(self, user_id: str, project_id: str = None):
+        """Get meetings for a user, optionally filtered by project"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                base_query = """
+                    SELECT m.meeting_id, m.meeting_name, m.meeting_date, m.created_at,
+                           p.project_name
+                    FROM meetings m
+                    LEFT JOIN projects p ON m.project_id = p.project_id
+                    WHERE m.user_id = %s
+                """
+                
+                params = [user_id]
+                
+                if project_id:
+                    base_query += " AND m.project_id = %s"
+                    params.append(project_id)
+                
+                base_query += " ORDER BY m.meeting_date DESC, m.created_at DESC;"
+                
+                cursor.execute(base_query, params)
+                rows = cursor.fetchall()
+                
+                meetings = []
+                for row in rows:
+                    meeting = Meeting(
+                        meeting_id=str(row['meeting_id']),
+                        user_id=user_id,
+                        project_id=project_id,
+                        meeting_name=row['meeting_name'],
+                        meeting_date=row['meeting_date'],
+                        created_at=row['created_at']
+                    )
+                    meetings.append(meeting)
+                
+                return meetings
+                
+        except Exception as e:
+            logger.error(f"Error getting user meetings: {e}")
+            return []
+    
+    # Session Management
+    def create_session(self, user_id: str, session_id: str, expires_at: datetime) -> bool:
+        """Create a new user session"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    INSERT INTO sessions (session_id, user_id, expires_at)
+                    VALUES (%s, %s, %s);
+                """, (session_id, user_id, expires_at))
+                
+                conn.commit()
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error creating session: {e}")
+            return False
+    
+    def validate_session(self, session_id: str) -> Optional[str]:
+        """Validate a session and return user_id if valid"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    SELECT user_id FROM sessions 
+                    WHERE session_id = %s 
+                    AND is_active = TRUE 
+                    AND expires_at > CURRENT_TIMESTAMP;
+                """, (session_id,))
+                
+                row = cursor.fetchone()
+                return str(row[0]) if row else None
+                
+        except Exception as e:
+            logger.error(f"Error validating session: {e}")
+            return None
+    
+    # Statistics and Maintenance
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive database statistics"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                stats = {}
+                
+                # User statistics
+                cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = TRUE;")
+                stats['active_users'] = cursor.fetchone()[0]
+                
+                # Document statistics
+                cursor.execute("SELECT COUNT(*) FROM documents WHERE is_deleted = FALSE;")
+                stats['documents'] = cursor.fetchone()[0]
+                
+                # Chunk statistics  
+                cursor.execute("SELECT COUNT(*) FROM document_chunks;")
+                stats['chunks'] = cursor.fetchone()[0]
+                
+                # Project statistics
+                cursor.execute("SELECT COUNT(*) FROM projects;")
+                stats['projects'] = cursor.fetchone()[0]
+                
+                # Database size
+                cursor.execute("""
+                    SELECT pg_size_pretty(pg_database_size(current_database()));
+                """)
+                stats['database_size'] = cursor.fetchone()[0]
+                
+                # Table sizes
+                cursor.execute("""
+                    SELECT 
+                        schemaname,
+                        tablename,
+                        pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename))
+                    FROM pg_tables 
+                    WHERE schemaname = 'public'
+                    ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+                """)
+                
+                table_sizes = cursor.fetchall()
+                stats['table_sizes'] = {row[1]: row[2] for row in table_sizes}
+                
+                stats['timestamp'] = datetime.now().isoformat()
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Error getting statistics: {e}")
+            return {}
+    
+    def cleanup_expired_sessions(self) -> int:
+        """Clean up expired sessions and return count of cleaned sessions"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                cursor.execute("""
+                    DELETE FROM sessions 
+                    WHERE expires_at < CURRENT_TIMESTAMP OR is_active = FALSE;
+                """)
+                
+                deleted_count = cursor.rowcount
+                conn.commit()
+                
+                logger.info(f"Cleaned up {deleted_count} expired sessions")
+                return deleted_count
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up sessions: {e}")
+            return 0
+    
+    # File Management
+    def calculate_file_hash(self, file_path: str) -> str:
+        """Calculate SHA-256 hash of a file"""
+        hasher = hashlib.sha256()
+        try:
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+        except Exception as e:
+            logger.error(f"Error calculating file hash: {e}")
+            return ""
+    
+    def is_file_duplicate(self, file_hash: str, filename: str, user_id: str) -> Optional[Dict]:
+        """Check if file is a duplicate based on hash and return original file info"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT d.document_id, d.filename, d.upload_date, d.file_size
+                    FROM documents d
+                    WHERE d.file_hash = %s 
+                    AND d.user_id = %s 
+                    AND d.is_deleted = FALSE
+                    ORDER BY d.upload_date DESC
+                    LIMIT 1;
+                """, (file_hash, user_id))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'document_id': str(row['document_id']),
+                        'filename': row['filename'],
+                        'upload_date': row['upload_date'].isoformat() if row['upload_date'] else '',
+                        'file_size': row['file_size']
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error checking file duplicate: {e}")
+            return None
+    
+    def store_file_hash(self, file_hash: str, filename: str, original_filename: str, 
+                       file_size: int, user_id: str, project_id: str = None, 
+                       meeting_id: str = None, document_id: str = None) -> str:
+        """Store file hash information for deduplication"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Generate hash_id since we're using VARCHAR instead of UUID with auto-generation
+                hash_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO file_hashes 
+                    (hash_id, file_hash, filename, original_filename, file_size, user_id, project_id, meeting_id, document_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                """, (hash_id, file_hash, filename, original_filename, file_size, user_id, project_id, meeting_id, document_id))
+                
+                conn.commit()
+                
+                return str(hash_id)
+                
+        except Exception as e:
+            logger.error(f"Error storing file hash: {e}")
+            return ""
+
+    # Job Management
+    def create_upload_job(self, user_id: str, total_files: int, project_id: str = None, 
+                         meeting_id: str = None) -> str:
+        """Create a new upload job for tracking batch processing"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Generate job_id since we're using VARCHAR instead of UUID with auto-generation
+                job_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO upload_jobs (job_id, user_id, total_files, project_id, meeting_id)
+                    VALUES (%s, %s, %s, %s, %s);
+                """, (job_id, user_id, total_files, project_id, meeting_id))
+                
+                conn.commit()
+                
+                logger.info(f"Created upload job: {job_id}")
+                return str(job_id)
+                
+        except Exception as e:
+            logger.error(f"Error creating upload job: {e}")
+            return ""
+    
+    def get_job_status(self, job_id: str) -> Optional[Dict]:
+        """Get current job status and progress"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT job_id, user_id, total_files, processed_files, failed_files, 
+                           status, error_message, created_at, updated_at
+                    FROM upload_jobs WHERE job_id = %s;
+                """, (job_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'job_id': str(row['job_id']),
+                        'user_id': str(row['user_id']),
+                        'total_files': row['total_files'],
+                        'processed_files': row['processed_files'],
+                        'failed_files': row['failed_files'],
+                        'status': row['status'],
+                        'error_message': row['error_message'],
+                        'created_at': row['created_at'].isoformat() if row['created_at'] else '',
+                        'updated_at': row['updated_at'].isoformat() if row['updated_at'] else ''
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting job status: {e}")
+            return None
+    
+    def update_job_status(self, job_id: str, status: str, processed_files: int = None, 
+                         failed_files: int = None, error_message: str = None):
+        """Update job status and progress"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                update_parts = ["status = %s", "updated_at = CURRENT_TIMESTAMP"]
+                params = [status]
+                
+                if processed_files is not None:
+                    update_parts.append("processed_files = %s")
+                    params.append(processed_files)
+                
+                if failed_files is not None:
+                    update_parts.append("failed_files = %s") 
+                    params.append(failed_files)
+                
+                if error_message is not None:
+                    update_parts.append("error_message = %s")
+                    params.append(error_message)
+                
+                params.append(job_id)
+                
+                cursor.execute(f"""
+                    UPDATE upload_jobs SET {', '.join(update_parts)}
+                    WHERE job_id = %s;
+                """, params)
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error updating job status: {e}")
+    
+    def create_file_processing_status(self, job_id: str, filename: str, file_size: int, 
+                                    file_hash: str) -> str:
+        """Create file processing status entry"""
+        # For PostgreSQL, this could be tracked in a separate table or within upload_jobs
+        # For now, return a UUID as placeholder similar to SQLite implementation
+        import uuid
+        return str(uuid.uuid4())
+    
+    def update_file_processing_status(self, status_id: str, status: str, 
+                                    error_message: str = None, document_id: str = None, 
+                                    chunks_created: int = None):
+        """Update file processing status"""
+        # For PostgreSQL, this could update a status tracking table
+        # For now, pass silently similar to SQLite implementation
+        pass
+    
+    def get_index_stats(self) -> Dict[str, Any]:
+        """Get vector index statistics for PostgreSQL + pgvector"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Get total number of vectors
+                cursor.execute("SELECT COUNT(*) FROM document_chunks WHERE embedding IS NOT NULL;")
+                total_vectors = cursor.fetchone()[0]
+                
+                # Get vector dimension (sample from first vector)
+                cursor.execute("SELECT vector_dims(embedding) FROM document_chunks WHERE embedding IS NOT NULL LIMIT 1;")
+                dimension_result = cursor.fetchone()
+                dimension = dimension_result[0] if dimension_result else self.vector_dimension
+                
+                # Get metadata entries (total chunks with content)
+                cursor.execute("SELECT COUNT(*) FROM document_chunks WHERE content IS NOT NULL;")
+                metadata_entries = cursor.fetchone()[0]
+                
+                stats = {
+                    'total_vectors': total_vectors,
+                    'dimension': dimension,
+                    'metadata_entries': metadata_entries,
+                    'index_type': 'pgvector',
+                    'database_type': 'postgresql'
+                }
+                
+                logger.info(f"Index stats: {stats}")
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Error getting index stats: {e}")
+            return {
+                'total_vectors': 0,
+                'dimension': self.vector_dimension,
+                'metadata_entries': 0,
+                'index_type': 'pgvector',
+                'database_type': 'postgresql'
+            }
+    
+    def store_document_metadata(self, filename: str, content: str, user_id: str, 
+                              project_id: str = None, meeting_id: str = None) -> str:
+        """Store document metadata and return document_id"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                # Generate document_id since we're using VARCHAR instead of UUID with auto-generation
+                document_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO documents (document_id, user_id, project_id, meeting_id, filename, processing_status)
+                    VALUES (%s, %s, %s, %s, %s, %s);
+                """, (document_id, user_id, project_id, meeting_id, filename, 'pending'))
+                
+                conn.commit()
+                
+                return str(document_id)
+                
+        except Exception as e:
+            logger.error(f"Error storing document metadata: {e}")
+            return ""
+    
+    def get_document_metadata(self, document_id: str) -> Dict[str, Any]:
+        """Get metadata for a specific document"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT d.*, p.project_name, m.meeting_name
+                    FROM documents d
+                    LEFT JOIN projects p ON d.project_id = p.project_id
+                    LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
+                    WHERE d.document_id = %s;
+                """, (document_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error getting document metadata: {e}")
+            return {}
+    
+    def get_project_documents(self, project_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Get all documents for a specific project"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                cursor.execute("""
+                    SELECT d.document_id, d.filename, d.content_summary, d.upload_date,
+                           d.file_size, d.chunk_count, d.processing_status
+                    FROM documents d
+                    WHERE d.project_id = %s AND d.user_id = %s AND d.is_deleted = FALSE
+                    ORDER BY d.upload_date DESC;
+                """, (project_id, user_id))
+                
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+                
+        except Exception as e:
+            logger.error(f"Error getting project documents: {e}")
+            return []
+
+    def get_all_documents(self, user_id: str = None) -> List[Dict[str, Any]]:
+        """Get all documents with metadata"""
+        try:
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                base_query = """
+                    SELECT 
+                        d.document_id, d.filename, d.original_filename, d.content_summary,
+                        d.upload_date, d.file_size, d.chunk_count,
+                        p.project_name, m.meeting_name
+                    FROM documents d
+                    LEFT JOIN projects p ON d.project_id = p.project_id
+                    LEFT JOIN meetings m ON d.meeting_id = m.meeting_id
+                    WHERE d.is_deleted = FALSE
+                """
+                
+                params = []
+                if user_id:
+                    base_query += " AND d.user_id = %s"
+                    params.append(user_id)
+                
+                base_query += " ORDER BY d.upload_date DESC;"
+                
+                cursor.execute(base_query, params)
+                rows = cursor.fetchall()
+                
+                documents = []
+                for row in rows:
+                    doc = {
+                        'document_id': str(row['document_id']),
+                        'filename': row['filename'],
+                        'original_filename': row['original_filename'],
+                        'content_summary': row['content_summary'],
+                        'upload_date': row['upload_date'].isoformat() if row['upload_date'] else '',
+                        'file_size': row['file_size'],
+                        'chunk_count': row['chunk_count'],
+                        'project_name': row['project_name'],
+                        'meeting_name': row['meeting_name']
+                    }
+                    documents.append(doc)
+                
+                return documents
+                
+        except Exception as e:
+            logger.error(f"Error getting documents: {e}")
+            return []

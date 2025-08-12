@@ -79,7 +79,7 @@ def generate_embeddings(texts: List[str]) -> List[List[float]]:
             if not text or not text.strip():
                 # Handle empty text
                 logger.warning("Empty text provided for embedding")
-                embeddings.append([0.0] * 3072)  # text-embedding-3-large dimension
+                embeddings.append([0.0] * 1536)  # text-embedding-3-small dimension
                 continue
                 
             try:
@@ -91,7 +91,7 @@ def generate_embeddings(texts: List[str]) -> List[List[float]]:
             except Exception as e:
                 logger.error(f"Failed to generate embedding for text: {e}")
                 # Use empty vector if that fails
-                embeddings.append([0.0] * 3072)
+                embeddings.append([0.0] * 1536)
         
         logger.debug(f"Successfully generated {len(embeddings)} embeddings")
         return embeddings

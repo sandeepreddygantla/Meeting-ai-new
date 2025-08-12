@@ -141,9 +141,9 @@ def get_embedding_model(access_token: str = None):
             return None
         
         return OpenAIEmbeddings(
-            model="text-embedding-3-large",  # Best embedding model available
+            model="text-embedding-3-small",  # Optimized embedding model (1536 dimensions)
             openai_api_key=current_api_key,
-            dimensions=3072  # Full dimension size
+            dimensions=1536  # Optimized dimension size
         )
     except Exception as e:
         logger.error(f"Error creating embedding model: {e}")
@@ -1085,13 +1085,13 @@ Examples:
             try:
                 if self.embedding_model is None:
                     logger.warning("Embedding model not available, using zero vector")
-                    embedding_array = np.zeros(3072)
+                    embedding_array = np.zeros(1536)
                 else:
                     embedding = self.embedding_model.embed_query(chunk_content)
                     embedding_array = np.array(embedding)
             except Exception as e:
                 logger.error(f"Error generating embedding for chunk {chunk_id}: {e}")
-                embedding_array = np.zeros(3072)
+                embedding_array = np.zeros(1536)
             
             # Extract chunk-specific intelligence
             chunk_intelligence = self._extract_chunk_intelligence(chunk_content, intelligence_data, i, len(base_chunks))

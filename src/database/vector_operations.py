@@ -19,13 +19,13 @@ logger = logging.getLogger(__name__)
 class VectorOperations:
     """Handles simplified FAISS vector database operations - upload and search only"""
     
-    def __init__(self, index_path: str = "vector_index.faiss", dimension: int = 3072):
+    def __init__(self, index_path: str = "vector_index.faiss", dimension: int = 1536):
         """
         Initialize vector operations with simple IndexFlatIP
         
         Args:
             index_path: Path to FAISS index file
-            dimension: Vector dimension (3072 for text-embedding-3-large)
+            dimension: Vector dimension (1536 for text-embedding-3-small)
         """
         self.index_path = index_path
         self.dimension = dimension

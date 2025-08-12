@@ -37,7 +37,7 @@ class DatabaseManager:
         """
         self.db_path = db_path
         self.index_path = index_path
-        self.dimension = 3072  # text-embedding-3-large dimension
+        self.dimension = 1536  # text-embedding-3-small dimension
         
         # Set up the SQLite and vector operations
         self.sqlite_ops = SQLiteOperations(db_path)

@@ -23,3 +23,4 @@ flask-session
 bcrypt
 flask-socketio
 markdown
+psycopg2-binary
