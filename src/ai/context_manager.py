@@ -368,11 +368,18 @@ class EnhancedContextManager:
                 doc_chunks = self.db_manager.get_document_chunks(doc['document_id'])
                 
                 for chunk in doc_chunks:
+                    if isinstance(chunk, dict):
+                        chunk_content = chunk.get('content', '')
+                        chunk_id = chunk.get('chunk_id', '')
+                    else:
+                        chunk_content = getattr(chunk, 'content', '')
+                        chunk_id = getattr(chunk, 'chunk_id', '')
+                    
                     context_chunks.append({
-                        'text': chunk.content if hasattr(chunk, 'content') else '',
+                        'text': chunk_content,
                         'document_name': doc.get('filename', 'Unknown'),
                         'document_id': doc['document_id'],
-                        'chunk_id': chunk.chunk_id if hasattr(chunk, 'chunk_id') else '',
+                        'chunk_id': chunk_id,
                         'timestamp': doc.get('upload_date', None),
                         'metadata': {
                             'project_id': doc.get('project_id'),

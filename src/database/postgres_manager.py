@@ -336,6 +336,60 @@ class PostgresManager:
                     
                     logger.info("folder_path column added and existing documents updated")
                 
+                # Check for existing unique constraints on documents table
+                cursor.execute("""
+                    SELECT constraint_name 
+                    FROM information_schema.table_constraints 
+                    WHERE table_name = 'documents' 
+                    AND constraint_type = 'UNIQUE'
+                    AND constraint_name LIKE '%user%filename%';
+                """)
+                
+                existing_constraints = [row[0] for row in cursor.fetchall()]
+                logger.info(f"Found existing constraints: {existing_constraints}")
+                
+                # Drop any old unique constraints that conflict with our new approach
+                for constraint in existing_constraints:
+                    if constraint in ['documents_user_filename_unique', 'documents_user_filename_status_unique']:
+                        try:
+                            cursor.execute(f"ALTER TABLE documents DROP CONSTRAINT IF EXISTS {constraint};")
+                            logger.info(f"Dropped constraint: {constraint}")
+                        except Exception as e:
+                            logger.warning(f"Could not drop constraint {constraint}: {e}")
+                
+                # Check if we need to add the correct deduplication constraint
+                cursor.execute("""
+                    SELECT constraint_name 
+                    FROM information_schema.table_constraints 
+                    WHERE table_name = 'documents' AND constraint_name = 'documents_user_filename_unique_v2';
+                """)
+                
+                if not cursor.fetchone():
+                    logger.info("Adding improved deduplication constraint...")
+                    try:
+                        # Clean up any existing duplicates first (including empty file_hash)
+                        cursor.execute("""
+                            DELETE FROM documents 
+                            WHERE document_id NOT IN (
+                                SELECT MIN(document_id) 
+                                FROM documents 
+                                GROUP BY user_id, filename
+                            );
+                        """)
+                        logger.info("Cleaned up duplicate documents")
+                        
+                        # Use filename-based constraint that handles empty hashes properly
+                        # This is more reliable than hash-based since hashes can be empty
+                        cursor.execute("""
+                            ALTER TABLE documents 
+                            ADD CONSTRAINT documents_user_filename_unique_v2 
+                            UNIQUE (user_id, filename);
+                        """)
+                        logger.info("Added unique constraint on user_id + filename")
+                    except Exception as e:
+                        logger.warning(f"Could not add filename-based constraint: {e}")
+                        # Continue without unique constraint - handle duplicates in application logic
+                
                 conn.commit()
                 logger.info("Database migrations completed successfully")
                 
@@ -348,26 +402,72 @@ class PostgresManager:
         """Add a document and all its chunks to the database"""
         try:
             with self.get_cursor() as (conn, cursor):
-                # Insert document metadata
-                # Generate document_id since we're using VARCHAR instead of UUID with auto-generation
-                document_id = str(uuid.uuid4())
+                # Get file hash, ensure it's not empty
+                file_hash = getattr(document, 'file_hash', '')
+                if not file_hash:
+                    # Generate a simple hash from filename + user_id if file_hash is empty
+                    file_hash = hashlib.sha256(f"{document.user_id}_{document.filename}".encode()).hexdigest()[:16]
+                    logger.info(f"Generated fallback hash for {document.filename}: {file_hash}")
+                
+                # Check if document already exists (any status)
                 cursor.execute("""
-                    INSERT INTO documents (
-                        document_id, user_id, project_id, meeting_id, filename, original_filename,
-                        file_path, file_size, file_hash, content_type,
-                        content_summary, main_topics, participants, key_decisions, action_items,
-                        processing_status, chunk_count, folder_path
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-                """, (
-                    document_id, document.user_id, document.project_id, document.meeting_id,
-                    document.filename, getattr(document, 'original_filename', document.filename),
-                    getattr(document, 'file_path', ''), getattr(document, 'file_size', 0),
-                    getattr(document, 'file_hash', ''), getattr(document, 'content_type', ''),
-                    getattr(document, 'content_summary', ''), getattr(document, 'main_topics', ''),
-                    getattr(document, 'participants', ''), getattr(document, 'key_decisions', ''),
-                    getattr(document, 'action_items', ''), 'completed', len(chunks),
-                    getattr(document, 'folder_path', None)
-                ))
+                    SELECT document_id, processing_status FROM documents 
+                    WHERE user_id = %s AND filename = %s
+                    ORDER BY upload_date DESC LIMIT 1;
+                """, (document.user_id, document.filename))
+                
+                existing_doc = cursor.fetchone()
+                
+                if existing_doc:
+                    document_id, status = existing_doc
+                    
+                    if status == 'pending':
+                        # Update existing pending record to completed
+                        logger.info(f"Updating existing pending document: {document_id}")
+                        
+                        cursor.execute("""
+                            UPDATE documents SET
+                                original_filename = %s, file_path = %s, file_size = %s, file_hash = %s,
+                                content_type = %s, content_summary = %s, main_topics = %s, 
+                                participants = %s, key_decisions = %s, action_items = %s,
+                                processing_status = 'completed', chunk_count = %s,
+                                processed_date = CURRENT_TIMESTAMP
+                            WHERE document_id = %s;
+                        """, (
+                            getattr(document, 'original_filename', document.filename),
+                            getattr(document, 'file_path', ''), getattr(document, 'file_size', 0),
+                            file_hash, getattr(document, 'content_type', ''),
+                            getattr(document, 'content_summary', ''), getattr(document, 'main_topics', ''),
+                            getattr(document, 'participants', ''), getattr(document, 'key_decisions', ''),
+                            getattr(document, 'action_items', ''), len(chunks), document_id
+                        ))
+                    else:
+                        # Document already completed - skip processing to avoid constraint violation
+                        logger.info(f"Document {document.filename} already exists with status {status} - skipping")
+                        return document_id
+                        
+                else:
+                    # No existing record found, insert new completed record
+                    document_id = str(uuid.uuid4())
+                    logger.info(f"Creating new document record: {document_id}")
+                    
+                    cursor.execute("""
+                        INSERT INTO documents (
+                            document_id, user_id, project_id, meeting_id, filename, original_filename,
+                            file_path, file_size, file_hash, content_type,
+                            content_summary, main_topics, participants, key_decisions, action_items,
+                            processing_status, chunk_count, folder_path
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (
+                        document_id, document.user_id, document.project_id, document.meeting_id,
+                        document.filename, getattr(document, 'original_filename', document.filename),
+                        getattr(document, 'file_path', ''), getattr(document, 'file_size', 0),
+                        file_hash, getattr(document, 'content_type', ''),
+                        getattr(document, 'content_summary', ''), getattr(document, 'main_topics', ''),
+                        getattr(document, 'participants', ''), getattr(document, 'key_decisions', ''),
+                        getattr(document, 'action_items', ''), 'completed', len(chunks),
+                        getattr(document, 'folder_path', None)
+                    ))
                 
                 # Prepare chunk data for batch insert
                 chunk_data = []
@@ -391,9 +491,14 @@ class PostgresManager:
                         ) VALUES %s""",
                         chunk_data
                     )
+                    logger.info(f"Inserted {len(chunk_data)} chunks into document_chunks table")
+                else:
+                    logger.warning(f"No chunks with embeddings to insert for document {document.filename}")
                 
                 conn.commit()
                 logger.info(f"Successfully added document {document.filename} with {len(chunks)} chunks")
+                
+                return document_id
                 
         except Exception as e:
             logger.error(f"Error adding document {document.filename}: {e}")
@@ -1114,6 +1219,13 @@ class PostgresManager:
                 'database_type': 'postgresql'
             }
     
+    def save_index(self):
+        """Save index - for PostgreSQL this is a no-op since data is persisted automatically"""
+        # PostgreSQL + pgvector doesn't need explicit index saving like FAISS
+        # Data is automatically persisted to disk
+        logger.info("PostgreSQL index save requested - no action needed (auto-persisted)")
+        pass
+    
     def store_document_metadata(self, filename: str, content: str, user_id: str, 
                               project_id: str = None, meeting_id: str = None, 
                               folder_path: str = None) -> str:
@@ -1443,3 +1555,98 @@ class PostgresManager:
         except Exception as e:
             logger.error(f"Error getting user documents by folder: {e}")
             return []
+
+    def get_documents_by_timeframe(self, timeframe: str, user_id: str = None) -> List[Dict[str, Any]]:
+        """Get documents filtered by intelligent timeframe calculation"""
+        try:
+            start_date, end_date = self._calculate_date_range(timeframe)
+            
+            with self.get_cursor(dict_cursor=True) as (conn, cursor):
+                query_params = []
+                base_query = """
+                    SELECT document_id, filename, upload_date, content_summary, 
+                           main_topics, participants, user_id, meeting_id, project_id, folder_path
+                    FROM documents
+                    WHERE is_deleted = FALSE
+                """
+                
+                if user_id:
+                    base_query += " AND user_id = %s"
+                    query_params.append(user_id)
+                
+                if start_date:
+                    base_query += " AND upload_date >= %s"
+                    query_params.append(start_date)
+                
+                if end_date:
+                    base_query += " AND upload_date <= %s"
+                    query_params.append(end_date)
+                
+                base_query += " ORDER BY upload_date DESC"
+                
+                cursor.execute(base_query, tuple(query_params))
+                rows = cursor.fetchall()
+                
+                return [dict(row) for row in rows]
+                
+        except Exception as e:
+            logger.error(f"Error getting documents by timeframe: {e}")
+            return []
+    
+    def _calculate_date_range(self, timeframe: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """Calculate start and end dates for intelligent timeframe filtering"""
+        import calendar
+        
+        now = datetime.now()
+        today = now.date()
+        
+        # Get current week boundaries (Monday to Sunday)
+        current_week_start = today - timedelta(days=today.weekday())
+        current_week_end = current_week_start + timedelta(days=6)
+        
+        # Get last week boundaries
+        last_week_start = current_week_start - timedelta(days=7)
+        last_week_end = current_week_start - timedelta(days=1)
+        
+        # Get current month boundaries
+        current_month_start = today.replace(day=1)
+        _, last_day = calendar.monthrange(today.year, today.month)
+        current_month_end = today.replace(day=last_day)
+        
+        # Get last month boundaries
+        if today.month == 1:
+            last_month_year = today.year - 1
+            last_month = 12
+        else:
+            last_month_year = today.year
+            last_month = today.month - 1
+        
+        last_month_start = today.replace(year=last_month_year, month=last_month, day=1)
+        _, last_month_last_day = calendar.monthrange(last_month_year, last_month)
+        last_month_end = today.replace(year=last_month_year, month=last_month, day=last_month_last_day)
+        
+        # Convert dates to datetime objects for comparison
+        def to_datetime(date_obj):
+            return datetime.combine(date_obj, datetime.min.time())
+        
+        # Map timeframes to date ranges
+        timeframe_map = {
+            'current_week': (to_datetime(current_week_start), to_datetime(current_week_end)),
+            'last_week': (to_datetime(last_week_start), to_datetime(last_week_end)),
+            'current_month': (to_datetime(current_month_start), to_datetime(current_month_end)),
+            'last_month': (to_datetime(last_month_start), to_datetime(last_month_end)),
+            'current_year': (to_datetime(today.replace(month=1, day=1)), to_datetime(today.replace(month=12, day=31))),
+            'last_year': (to_datetime(today.replace(year=today.year-1, month=1, day=1)), 
+                         to_datetime(today.replace(year=today.year-1, month=12, day=31))),
+            'last_7_days': (to_datetime(today - timedelta(days=7)), to_datetime(today)),
+            'last_14_days': (to_datetime(today - timedelta(days=14)), to_datetime(today)),
+            'last_30_days': (to_datetime(today - timedelta(days=30)), to_datetime(today)),
+            'last_60_days': (to_datetime(today - timedelta(days=60)), to_datetime(today)),
+            'last_90_days': (to_datetime(today - timedelta(days=90)), to_datetime(today)),
+            'last_3_months': (to_datetime(today - timedelta(days=90)), to_datetime(today)),
+            'last_6_months': (to_datetime(today - timedelta(days=180)), to_datetime(today)),
+            'last_12_months': (to_datetime(today - timedelta(days=365)), to_datetime(today)),
+            'recent': (to_datetime(today - timedelta(days=30)), to_datetime(today))
+        }
+        
+        return timeframe_map.get(timeframe, (None, None))

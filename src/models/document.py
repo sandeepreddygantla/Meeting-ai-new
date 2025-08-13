@@ -26,6 +26,9 @@ class DocumentChunk:
     questions: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
     
+    # Vector embedding for PostgreSQL + pgvector
+    embedding: Optional[Any] = None
+    
     # Database fields
     created_at: Optional[datetime] = None
     vector_id: Optional[int] = None

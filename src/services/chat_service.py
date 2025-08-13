@@ -821,13 +821,18 @@ class ChatService:
                 return (error_msg, "") if include_context else error_msg
             
             # Sort documents by date (chronological processing)
-            sorted_docs = sorted(documents, key=lambda x: x.date if hasattr(x, 'date') and x.date else datetime.min)
+            def get_doc_date(x):
+                if isinstance(x, dict):
+                    return x.get('date') if x.get('date') else datetime.min
+                else:
+                    return x.date if hasattr(x, 'date') and x.date else datetime.min
+            sorted_docs = sorted(documents, key=get_doc_date)
             
             # Group documents by date for better organization
             date_groups = defaultdict(list)
             for doc in sorted_docs:
                 # Extract date from document
-                doc_date = doc.date if hasattr(doc, 'date') and doc.date else None
+                doc_date = doc.get('upload_date') if isinstance(doc, dict) else (doc.date if hasattr(doc, 'date') and doc.date else None)
                 if doc_date:
                     try:
                         if isinstance(doc_date, str):
@@ -857,10 +862,10 @@ class ChatService:
                 
                 for doc in docs:
                     # Add document summary with metadata
-                    doc_summary = f"Document: {doc.filename}\n"
+                    doc_summary = f"Document: {doc.get('filename') if isinstance(doc, dict) else doc.filename}\n"
                     
                     # Get document chunks for content summary
-                    chunks = self.db_manager.get_document_chunks(doc.document_id)
+                    chunks = self.db_manager.get_document_chunks(doc.get('document_id') if isinstance(doc, dict) else doc.document_id)
                     if chunks:
                         # Create content preview from first few chunks
                         content_preview = ""
@@ -874,12 +879,20 @@ class ChatService:
                             doc_summary += f"Content Preview: {content_preview.strip()}...\n"
                     
                     # Add available metadata
-                    if hasattr(doc, 'content_summary') and doc.content_summary:
-                        doc_summary += f"Summary: {doc.content_summary}\n"
-                    if hasattr(doc, 'main_topics') and doc.main_topics:
-                        doc_summary += f"Topics: {', '.join(doc.main_topics) if isinstance(doc.main_topics, list) else doc.main_topics}\n"
-                    if hasattr(doc, 'participants') and doc.participants:
-                        doc_summary += f"Participants: {', '.join(doc.participants) if isinstance(doc.participants, list) else doc.participants}\n"
+                    if isinstance(doc, dict):
+                        if doc.get('content_summary'):
+                            doc_summary += f"Summary: {doc['content_summary']}\n"
+                        if doc.get('main_topics'):
+                            doc_summary += f"Topics: {', '.join(doc['main_topics']) if isinstance(doc['main_topics'], list) else doc['main_topics']}\n"
+                        if doc.get('participants'):
+                            doc_summary += f"Participants: {', '.join(doc['participants']) if isinstance(doc['participants'], list) else doc['participants']}\n"
+                    else:
+                        if hasattr(doc, 'content_summary') and doc.content_summary:
+                            doc_summary += f"Summary: {doc.content_summary}\n"
+                        if hasattr(doc, 'main_topics') and doc.main_topics:
+                            doc_summary += f"Topics: {', '.join(doc.main_topics) if isinstance(doc.main_topics, list) else doc.main_topics}\n"
+                        if hasattr(doc, 'participants') and doc.participants:
+                            doc_summary += f"Participants: {', '.join(doc.participants) if isinstance(doc.participants, list) else doc.participants}\n"
                     
                     context_parts.append(doc_summary)
                     document_summaries.append(doc_summary)
@@ -1000,10 +1013,13 @@ IMPORTANT: When referencing information from the documents, always cite the docu
             
             # Organize by project structure
             for doc in documents:
-                doc_summary = f"\n=== {doc.filename} ===\n"
+                filename = doc.get('filename') if isinstance(doc, dict) else getattr(doc, 'filename', 'Unknown')
+                document_id = doc.get('document_id') if isinstance(doc, dict) else getattr(doc, 'document_id', None)
+                
+                doc_summary = f"\n=== {filename} ===\n"
                 
                 # Get document content through chunks
-                chunks = self.db_manager.get_document_chunks(doc.document_id)
+                chunks = self.db_manager.get_document_chunks(document_id)
                 
                 if chunks:
                     # Extract key information from chunks
@@ -1018,15 +1034,20 @@ IMPORTANT: When referencing information from the documents, always cite the docu
                         doc_summary += f"Content: {doc_content[:500]}...\n"
                 
                 # Add metadata if available
-                if hasattr(doc, 'content_summary') and doc.content_summary:
-                    doc_summary += f"Summary: {doc.content_summary}\n"
-                if hasattr(doc, 'date') and doc.date:
-                    doc_summary += f"Date: {doc.date}\n"
-                if hasattr(doc, 'main_topics') and doc.main_topics:
-                    topics_str = ', '.join(doc.main_topics) if isinstance(doc.main_topics, list) else doc.main_topics
+                content_summary = doc.get('content_summary') if isinstance(doc, dict) else getattr(doc, 'content_summary', None)
+                upload_date = doc.get('upload_date') if isinstance(doc, dict) else getattr(doc, 'upload_date', None)
+                main_topics = doc.get('main_topics') if isinstance(doc, dict) else getattr(doc, 'main_topics', None)
+                participants = doc.get('participants') if isinstance(doc, dict) else getattr(doc, 'participants', None)
+                
+                if content_summary:
+                    doc_summary += f"Summary: {content_summary}\n"
+                if upload_date:
+                    doc_summary += f"Date: {upload_date}\n"
+                if main_topics:
+                    topics_str = ', '.join(main_topics) if isinstance(main_topics, list) else main_topics
                     doc_summary += f"Key Topics: {topics_str}\n"
-                if hasattr(doc, 'participants') and doc.participants:
-                    speakers_str = ', '.join(doc.participants) if isinstance(doc.participants, list) else doc.participants
+                if participants:
+                    speakers_str = ', '.join(participants) if isinstance(participants, list) else participants
                     doc_summary += f"Participants: {speakers_str}\n"
                 
                 context_parts.append(doc_summary)

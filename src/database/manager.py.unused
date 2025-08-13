@@ -1,0 +1,2 @@
+# This file has been moved to .unused as it's no longer needed
+# SQLite + FAISS database manager replaced by PostgreSQL + pgvector

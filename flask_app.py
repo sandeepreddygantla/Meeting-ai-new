@@ -9,19 +9,14 @@ import logging
 
 # Import configuration
 from src.config.settings import setup_flask_config, get_base_path
-from src.config.database import setup_database_session, ensure_directories_exist
+from src.config.database import ensure_directories_exist
 from src.config.postgres_sessions import setup_postgres_session
 
 # Import AI client initialization
 from src.ai.llm_client import initialize_ai_clients
 
-# Import database manager
-try:
-    from src.database.postgres_manager import PostgresManager
-    USE_POSTGRES = True
-except ImportError:
-    from src.database.manager import DatabaseManager
-    USE_POSTGRES = False
+# Import database manager - PostgreSQL only
+from src.database.postgres_manager import PostgresManager
 
 # Import services
 from src.services.auth_service import AuthService
@@ -101,24 +96,17 @@ def initialize_services():
             logger.error("Could not import AI clients from meeting_processor")
             # Continue anyway - some functionality may be limited
         
-        # Initialize database manager
-        if USE_POSTGRES:
-            # Use PostgreSQL + pgvector
-            logger.info("Initializing PostgreSQL + pgvector database manager...")
-            db_manager = PostgresManager(
-                host="localhost",
-                database="meetingsai",
-                user="postgres", 
-                password="Sandeep@0904",
-                port=5432,
-                vector_dimension=1536
-            )
-            logger.info("PostgreSQL + pgvector database manager initialized successfully")
-        else:
-            # Fallback to SQLite + FAISS
-            logger.info("Initializing SQLite + FAISS database manager...")
-            db_manager = DatabaseManager()
-            logger.info("SQLite + FAISS database manager initialized successfully")
+        # Initialize PostgreSQL + pgvector database manager
+        logger.info("Initializing PostgreSQL + pgvector database manager...")
+        db_manager = PostgresManager(
+            host="localhost",
+            database="meetingsai",
+            user="postgres", 
+            password="Sandeep@0904",
+            port=5432,
+            vector_dimension=1536
+        )
+        logger.info("PostgreSQL + pgvector database manager initialized successfully")
         
         # Set up the document processor - reuse the same db connection
         if EnhancedMeetingDocumentProcessor:
@@ -134,14 +122,10 @@ def initialize_services():
                 logger.error(f"Failed to initialize processor: {e}")
                 processor = None
         
-        # Setup session interface based on database type
-        if USE_POSTGRES:
-            from src.config.postgres_sessions import setup_postgres_session
-            setup_postgres_session(app, db_manager)
-            logger.info("PostgreSQL session interface configured")
-        else:
-            setup_database_session(app)
-            logger.info("SQLite session interface configured")
+        # Setup PostgreSQL session interface
+        from src.config.postgres_sessions import setup_postgres_session
+        setup_postgres_session(app, db_manager)
+        logger.info("PostgreSQL session interface configured")
         
         # Wire up all the service classes
         services['auth_service'] = AuthService(db_manager)
@@ -296,6 +280,6 @@ if __name__ == '__main__':
     app = get_application()
     if app:
         logger.info(f"Starting development server with base path: {BASE_PATH}")
-        app.run(debug=False, host='0.0.0.0')
+        app.run(debug=True, host='0.0.0.0', port=5000)
     else:
         logger.error("Failed to get application instance")

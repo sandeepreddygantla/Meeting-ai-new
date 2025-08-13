@@ -449,7 +449,7 @@ class SQLiteOperations:
             for chunk in chunks:
                 chunk_data = (
                     chunk.chunk_id, chunk.document_id, chunk.filename, chunk.chunk_index,
-                    chunk.enhanced_content or chunk.content,
+                    getattr(chunk, 'enhanced_content', None) or chunk.content,
                     chunk.start_char, chunk.end_char,
                     chunk.user_id, chunk.meeting_id, chunk.project_id,
                     datetime.now()
@@ -737,6 +737,10 @@ class SQLiteOperations:
         except Exception as e:
             logger.error(f"Error getting document metadata: {e}")
             return {}
+    
+    def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get document by its ID"""
+        return self.get_document_metadata(document_id)
     
     def get_project_documents(self, project_id: str, user_id: str) -> List[Dict[str, Any]]:
         """Get all documents for a specific project"""

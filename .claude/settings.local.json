@@ -7,7 +7,8 @@
       "mcp__playwright__browser_wait_for",
       "mcp__playwright__browser_navigate",
       "mcp__playwright__browser_file_upload",
-      "mcp__playwright__browser_snapshot"
+      "mcp__playwright__browser_snapshot",
+      "Bash(python3:*)"
     ],
     "deny": []
   }

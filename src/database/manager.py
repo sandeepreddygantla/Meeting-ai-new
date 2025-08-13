@@ -301,31 +301,48 @@ class DatabaseManager:
             chunk = result['chunk']
             
             # Debug logging for each chunk
-            logger.info(f"Chunk {chunk.chunk_id}: project_id={getattr(chunk, 'project_id', 'None')}, meeting_id={getattr(chunk, 'meeting_id', 'None')}")
+            if isinstance(chunk, dict):
+                chunk_id = chunk.get('chunk_id', 'Unknown')
+                chunk_project_id = chunk.get('project_id')
+                chunk_meeting_id = chunk.get('meeting_id')
+                chunk_date = chunk.get('date')
+            else:
+                chunk_id = getattr(chunk, 'chunk_id', 'Unknown')
+                chunk_project_id = getattr(chunk, 'project_id', None)
+                chunk_meeting_id = getattr(chunk, 'meeting_id', None)
+                chunk_date = getattr(chunk, 'date', None)
+                
+            logger.info(f"Chunk {chunk_id}: project_id={chunk_project_id}, meeting_id={chunk_meeting_id}")
             
             # Apply filters
             if filters.get('date_range'):
                 start_date, end_date = filters['date_range']
-                if chunk.date:
-                    if start_date and chunk.date < start_date:
-                        logger.info(f"Filtering out chunk {chunk.chunk_id} - date too early")
+                if chunk_date:
+                    if start_date and chunk_date < start_date:
+                        logger.info(f"Filtering out chunk {chunk_id} - date too early")
                         continue
-                    if end_date and chunk.date > end_date:
-                        logger.info(f"Filtering out chunk {chunk.chunk_id} - date too late")
+                    if end_date and chunk_date > end_date:
+                        logger.info(f"Filtering out chunk {chunk_id} - date too late")
                         continue
             
-            if filters.get('project_id') and chunk.project_id != filters['project_id']:
-                logger.info(f"Filtering out chunk {chunk.chunk_id} - project_id mismatch: {chunk.project_id} != {filters['project_id']}")
+            if filters.get('project_id') and chunk_project_id != filters['project_id']:
+                logger.info(f"Filtering out chunk {chunk_id} - project_id mismatch: {chunk_project_id} != {filters['project_id']}")
                 continue
             
-            if filters.get('meeting_id') and chunk.meeting_id != filters['meeting_id']:
-                logger.info(f"Filtering out chunk {chunk.chunk_id} - meeting_id mismatch")
+            if filters.get('meeting_id') and chunk_meeting_id != filters['meeting_id']:
+                logger.info(f"Filtering out chunk {chunk_id} - meeting_id mismatch")
                 continue
             
             if filters.get('keywords'):
-                content_lower = chunk.content.lower()
+                if isinstance(chunk, dict):
+                    content_lower = chunk.get('content', '').lower()
+                    chunk_id_for_log = chunk.get('chunk_id', 'Unknown')
+                else:
+                    content_lower = getattr(chunk, 'content', '').lower()
+                    chunk_id_for_log = getattr(chunk, 'chunk_id', 'Unknown')
+                    
                 if not any(keyword.lower() in content_lower for keyword in filters['keywords']):
-                    logger.info(f"Filtering out chunk {chunk.chunk_id} - keyword mismatch")
+                    logger.info(f"Filtering out chunk {chunk_id_for_log} - keyword mismatch")
                     continue
             
             if filters.get('folder_path'):
@@ -349,30 +366,37 @@ class DatabaseManager:
                 
                     # For folder filtering, match against project name or project_id
                     # First try to match by actual folder_path if available
-                    chunk_folder_path = getattr(chunk, 'folder_path', None)
+                    if isinstance(chunk, dict):
+                        chunk_folder_path = chunk.get('folder_path')
+                        chunk_project_id_for_folder = chunk.get('project_id')
+                        chunk_id_for_folder_log = chunk.get('chunk_id', 'Unknown')
+                    else:
+                        chunk_folder_path = getattr(chunk, 'folder_path', None)
+                        chunk_project_id_for_folder = getattr(chunk, 'project_id', None)
+                        chunk_id_for_folder_log = getattr(chunk, 'chunk_id', 'Unknown')
+                        
                     if chunk_folder_path and chunk_folder_path == filter_folder_path:
                         # Direct folder_path match
-                        logger.info(f"Including chunk {chunk.chunk_id} - direct folder_path match: {chunk_folder_path}")
+                        logger.info(f"Including chunk {chunk_id_for_folder_log} - direct folder_path match: {chunk_folder_path}")
                     else:
                         # Try matching by project_id or project name
-                        chunk_project_id = getattr(chunk, 'project_id', None)
-                        if chunk_project_id:
+                        if chunk_project_id_for_folder:
                             # If we have a target project_id from synthetic path, match against it
-                            if target_project_id and chunk_project_id == target_project_id:
-                                logger.info(f"Including chunk {chunk.chunk_id} - project_id match: {chunk_project_id}")
+                            if target_project_id and chunk_project_id_for_folder == target_project_id:
+                                logger.info(f"Including chunk {chunk_id_for_folder_log} - project_id match: {chunk_project_id_for_folder}")
                             else:
                                 # Otherwise try matching by project name
                                 try:
-                                    project_info = self.sqlite_ops.get_project_by_id(chunk_project_id)
+                                    project_info = self.sqlite_ops.get_project_by_id(chunk_project_id_for_folder)
                                     if project_info:
                                         project_name = project_info.project_name
                                         if project_name == target_project_name:
-                                            logger.info(f"Including chunk {chunk.chunk_id} - project name match: {project_name}")
+                                            logger.info(f"Including chunk {chunk_id_for_folder_log} - project name match: {project_name}")
                                         else:
-                                            logger.info(f"Filtering out chunk {chunk.chunk_id} - project name mismatch for folder filtering: {project_name} != {target_project_name}")
+                                            logger.info(f"Filtering out chunk {chunk_id_for_folder_log} - project name mismatch for folder filtering: {project_name} != {target_project_name}")
                                             continue
                                     else:
-                                        logger.info(f"Filtering out chunk {chunk.chunk_id} - no project found for project_id: {chunk_project_id}")
+                                        logger.info(f"Filtering out chunk {chunk_id_for_folder_log} - no project found for project_id: {chunk_project_id_for_folder}")
                                         continue
                                 except Exception as e:
                                     logger.error(f"Error getting project info for folder filtering: {e}")
@@ -380,14 +404,14 @@ class DatabaseManager:
                         else:
                             # If no project matching is possible, include the chunk anyway for now
                             # This prevents overly strict filtering that removes all results
-                            logger.info(f"Including chunk {chunk.chunk_id} - relaxed folder filtering (no project info available)")
+                            logger.info(f"Including chunk {chunk_id_for_folder_log} - relaxed folder filtering (no project info available)")
                             # Continue processing instead of filtering out
                             pass
                 else:
                     # No folder filtering when folder_path doesn't contain project info
                     logger.info(f"Folder path '{filter_folder_path}' - no project filtering applied")
             
-            logger.info(f"Including chunk {chunk.chunk_id} in results")
+            logger.info(f"Including chunk {chunk_id} in results")
             filtered_results.append(result)
         
         logger.info(f"Total search results after filtering: {len(filtered_results)}")
@@ -396,19 +420,36 @@ class DatabaseManager:
     def _reconstruct_chunk_context(self, chunk) -> Dict:
         """Reconstruct complete context around a chunk"""
         try:
+            # Handle both dictionary and object chunk formats
+            if isinstance(chunk, dict):
+                chunk_date = chunk.get('date')
+                chunk_index = chunk.get('chunk_index', 0)
+                document_title = chunk.get('document_title', '')
+                content_summary = chunk.get('content_summary', '')
+                main_topics = chunk.get('main_topics', '')
+                participants = chunk.get('participants', '')
+            else:
+                chunk_date = getattr(chunk, 'date', None)
+                chunk_index = getattr(chunk, 'chunk_index', 0)
+                document_title = getattr(chunk, 'document_title', '')
+                content_summary = getattr(chunk, 'content_summary', '')
+                main_topics = getattr(chunk, 'main_topics', '')
+                participants = getattr(chunk, 'participants', '')
+            
             context = {
-                'document_title': getattr(chunk, 'document_title', ''),
-                'document_date': chunk.date.isoformat() if chunk.date else '',
-                'chunk_position': f"{chunk.chunk_index + 1}",
-                'document_summary': getattr(chunk, 'content_summary', ''),
-                'main_topics': getattr(chunk, 'main_topics', ''),
-                'participants': getattr(chunk, 'participants', ''),
+                'document_title': document_title,
+                'document_date': chunk_date.isoformat() if chunk_date else '',
+                'chunk_position': f"{chunk_index + 1}",
+                'document_summary': content_summary,
+                'main_topics': main_topics,
+                'participants': participants,
                 'related_chunks': []
             }
             
             # Get meeting context if available
-            if hasattr(chunk, 'document_id'):
-                meeting_context = self._get_meeting_context(chunk.document_id)
+            document_id = chunk.get('document_id') if isinstance(chunk, dict) else getattr(chunk, 'document_id', None)
+            if document_id:
+                meeting_context = self._get_meeting_context(document_id)
                 context.update(meeting_context)
             
             return context
@@ -610,6 +651,10 @@ class DatabaseManager:
     def get_document_metadata(self, document_id: str) -> Dict[str, Any]:
         """Get metadata for a specific document"""
         return self.sqlite_ops.get_document_metadata(document_id)
+    
+    def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get document by its ID"""
+        return self.sqlite_ops.get_document_by_id(document_id)
     
     def get_project_documents(self, project_id: str, user_id: str) -> List[Dict[str, Any]]:
         """Get all documents for a specific project"""

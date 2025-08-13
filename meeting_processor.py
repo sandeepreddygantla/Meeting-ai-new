@@ -351,15 +351,28 @@ class EnhancedMeetingDocumentProcessor:
             
             for doc in docs:
                 # Add document summary
-                doc_summary = f"Document: {getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))}\n"
-                if doc.content_summary:
-                    doc_summary += f"Summary: {doc.content_summary}\n"
-                if doc.main_topics:
-                    doc_summary += f"Main Topics: {', '.join(doc.main_topics)}\n"
-                if doc.participants:
-                    doc_summary += f"Participants: {', '.join(doc.participants)}\n"
-                if doc.future_actions:
-                    doc_summary += f"Action Items: {', '.join(doc.future_actions)}\n"
+                if isinstance(doc, dict):
+                    doc_name = doc.get('filename') or doc.get('document_title') or 'Unknown Document'
+                    doc_summary = f"Document: {doc_name}\n"
+                    if doc.get('content_summary'):
+                        doc_summary += f"Summary: {doc['content_summary']}\n"
+                    if doc.get('main_topics'):
+                        doc_summary += f"Main Topics: {', '.join(doc['main_topics']) if isinstance(doc['main_topics'], list) else doc['main_topics']}\n"
+                    if doc.get('participants'):
+                        doc_summary += f"Participants: {', '.join(doc['participants']) if isinstance(doc['participants'], list) else doc['participants']}\n"
+                    if doc.get('future_actions'):
+                        doc_summary += f"Action Items: {', '.join(doc['future_actions']) if isinstance(doc['future_actions'], list) else doc['future_actions']}\n"
+                else:
+                    doc_name = getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))
+                    doc_summary = f"Document: {doc_name}\n"
+                    if hasattr(doc, 'content_summary') and doc.content_summary:
+                        doc_summary += f"Summary: {doc.content_summary}\n"
+                    if hasattr(doc, 'main_topics') and doc.main_topics:
+                        doc_summary += f"Main Topics: {', '.join(doc.main_topics) if isinstance(doc.main_topics, list) else doc.main_topics}\n"
+                    if hasattr(doc, 'participants') and doc.participants:
+                        doc_summary += f"Participants: {', '.join(doc.participants) if isinstance(doc.participants, list) else doc.participants}\n"
+                    if hasattr(doc, 'future_actions') and doc.future_actions:
+                        doc_summary += f"Action Items: {', '.join(doc.future_actions) if isinstance(doc.future_actions, list) else doc.future_actions}\n"
                 
                 context_parts.append(doc_summary)
                 document_summaries.append(doc_summary)
@@ -410,20 +423,41 @@ class EnhancedMeetingDocumentProcessor:
                 fallback_parts.append(f"\n**{date_formatted}:**")
                 
                 for doc in docs:
-                    fallback_parts.append(f"\n• **{getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))}**")
-                    
-                    # Include actual content summary if available
-                    if doc.content_summary:
-                        fallback_parts.append(f"  {doc.content_summary}")
-                    
-                    # Include main topics if available  
-                    if doc.main_topics:
-                        topics_str = ', '.join(doc.main_topics[:3])  # First 3 topics
-                        fallback_parts.append(f"  *Topics: {topics_str}*")
-                    
-                    # Include participants if available
-                    if doc.participants:
-                        participants_str = ', '.join(doc.participants[:3])  # First 3 participants
+                    if isinstance(doc, dict):
+                        doc_name = doc.get('filename') or doc.get('document_title') or 'Unknown Document'
+                        fallback_parts.append(f"\n• **{doc_name}**")
+                        
+                        # Include actual content summary if available
+                        if doc.get('content_summary'):
+                            fallback_parts.append(f"  {doc['content_summary']}")
+                        
+                        # Include main topics if available  
+                        if doc.get('main_topics'):
+                            topics = doc['main_topics'][:3] if isinstance(doc['main_topics'], list) else str(doc['main_topics'])
+                            topics_str = ', '.join(topics) if isinstance(topics, list) else topics
+                            fallback_parts.append(f"  *Topics: {topics_str}*")
+                        
+                        # Include participants if available
+                        if doc.get('participants'):
+                            participants = doc['participants'][:3] if isinstance(doc['participants'], list) else str(doc['participants'])
+                            participants_str = ', '.join(participants) if isinstance(participants, list) else participants
+                            fallback_parts.append(f"  *Participants: {participants_str}*")
+                    else:
+                        doc_name = getattr(doc, 'filename', getattr(doc, 'document_title', 'Unknown Document'))
+                        fallback_parts.append(f"\n• **{doc_name}**")
+                        
+                        # Include actual content summary if available
+                        if hasattr(doc, 'content_summary') and doc.content_summary:
+                            fallback_parts.append(f"  {doc.content_summary}")
+                        
+                        # Include main topics if available  
+                        if hasattr(doc, 'main_topics') and doc.main_topics:
+                            topics_str = ', '.join(doc.main_topics[:3])  # First 3 topics
+                            fallback_parts.append(f"  *Topics: {topics_str}*")
+                        
+                        # Include participants if available
+                        if hasattr(doc, 'participants') and doc.participants:
+                            participants_str = ', '.join(doc.participants[:3])  # First 3 participants
                         fallback_parts.append(f"  *Participants: {participants_str}*")
             
             fallback_summary = '\n'.join(fallback_parts)
@@ -1100,17 +1134,20 @@ Examples:
             chunk = DocumentChunk(
                 chunk_id=chunk_id,
                 document_id=document.document_id,
-                user_id=document.user_id,
-                content=chunk_content,
+                filename=document.filename,
                 chunk_index=i,
+                content=chunk_content,
                 start_char=start_char,
                 end_char=end_char,
-                # Copy essential metadata from document - FIX FOR USER_ID BUG
+                user_id=document.user_id,
                 meeting_id=document.meeting_id,
                 project_id=document.project_id,
                 date=document.date,
                 document_title=document.title
             )
+            
+            # Assign the embedding to the chunk
+            chunk.embedding = embedding_array
             
             # Add intelligence metadata
             chunk.enhanced_content = self._create_enhanced_content(chunk_content, chunk_intelligence)
@@ -1687,7 +1724,11 @@ Examples:
             chunk = result['chunk']
             
             # Collect content statistics
-            total_content_length += len(chunk.content) if chunk.content else 0
+            if isinstance(chunk, dict):
+                chunk_content = chunk.get('content', '')
+            else:
+                chunk_content = getattr(chunk, 'content', '')
+            total_content_length += len(chunk_content) if chunk_content else 0
             
             # Extract speakers
             if hasattr(chunk, 'speakers') and chunk.speakers:
@@ -1699,30 +1740,57 @@ Examples:
                     pass
             
             # Extract meetings and dates
-            if hasattr(chunk, 'document_title') and chunk.document_title:
-                meetings.add(chunk.document_title)
-            elif hasattr(chunk, 'filename') and chunk.filename:
-                meetings.add(chunk.filename)
+            if isinstance(chunk, dict):
+                if chunk.get('document_title'):
+                    meetings.add(chunk['document_title'])
+                elif chunk.get('filename'):
+                    meetings.add(chunk['filename'])
+            else:
+                if hasattr(chunk, 'document_title') and getattr(chunk, 'document_title', None):
+                    meetings.add(getattr(chunk, 'document_title', ''))
+                elif hasattr(chunk, 'filename') and getattr(chunk, 'filename', None):
+                    meetings.add(getattr(chunk, 'filename', ''))
             
-            if hasattr(chunk, 'date') and chunk.date:
-                dates.append(chunk.date)
+            if isinstance(chunk, dict):
+                if chunk.get('date'):
+                    dates.append(chunk['date'])
+            else:
+                if hasattr(chunk, 'date') and getattr(chunk, 'date', None):
+                    dates.append(getattr(chunk, 'date', None))
             
             # Count decisions and actions
-            if hasattr(chunk, 'decisions') and chunk.decisions:
-                try:
-                    import json
-                    decisions = json.loads(chunk.decisions) if isinstance(chunk.decisions, str) else chunk.decisions
-                    decisions_count += len(decisions) if decisions else 0
-                except:
-                    pass
-            
-            if hasattr(chunk, 'actions') and chunk.actions:
-                try:
-                    import json
-                    actions = json.loads(chunk.actions) if isinstance(chunk.actions, str) else chunk.actions
-                    actions_count += len(actions) if actions else 0
-                except:
-                    pass
+            if isinstance(chunk, dict):
+                if chunk.get('decisions'):
+                    try:
+                        import json
+                        decisions = json.loads(chunk['decisions']) if isinstance(chunk['decisions'], str) else chunk['decisions']
+                        decisions_count += len(decisions) if decisions else 0
+                    except:
+                        pass
+                
+                if chunk.get('actions'):
+                    try:
+                        import json
+                        actions = json.loads(chunk['actions']) if isinstance(chunk['actions'], str) else chunk['actions']
+                        actions_count += len(actions) if actions else 0
+                    except:
+                        pass
+            else:
+                if hasattr(chunk, 'decisions') and chunk.decisions:
+                    try:
+                        import json
+                        decisions = json.loads(chunk.decisions) if isinstance(chunk.decisions, str) else chunk.decisions
+                        decisions_count += len(decisions) if decisions else 0
+                    except:
+                        pass
+                
+                if hasattr(chunk, 'actions') and chunk.actions:
+                    try:
+                        import json
+                        actions = json.loads(chunk.actions) if isinstance(chunk.actions, str) else chunk.actions
+                        actions_count += len(actions) if actions else 0
+                    except:
+                        pass
         
         # Calculate time span
         if dates and len(dates) > 1:
@@ -1822,26 +1890,48 @@ Examples:
                 except:
                     metadata['speakers'] = []
             
-            if hasattr(chunk, 'decisions') and chunk.decisions:
-                try:
-                    import json
-                    metadata['decisions'] = json.loads(chunk.decisions) if isinstance(chunk.decisions, str) else chunk.decisions
-                except:
-                    metadata['decisions'] = []
-                    
-            if hasattr(chunk, 'actions') and chunk.actions:
-                try:
-                    import json
-                    metadata['actions'] = json.loads(chunk.actions) if isinstance(chunk.actions, str) else chunk.actions
-                except:
-                    metadata['actions'] = []
+            if isinstance(chunk, dict):
+                if chunk.get('decisions'):
+                    try:
+                        import json
+                        metadata['decisions'] = json.loads(chunk['decisions']) if isinstance(chunk['decisions'], str) else chunk['decisions']
+                    except:
+                        metadata['decisions'] = []
+                        
+                if chunk.get('actions'):
+                    try:
+                        import json
+                        metadata['actions'] = json.loads(chunk['actions']) if isinstance(chunk['actions'], str) else chunk['actions']
+                    except:
+                        metadata['actions'] = []
+            else:
+                if hasattr(chunk, 'decisions') and chunk.decisions:
+                    try:
+                        import json
+                        metadata['decisions'] = json.loads(chunk.decisions) if isinstance(chunk.decisions, str) else chunk.decisions
+                    except:
+                        metadata['decisions'] = []
+                        
+                if hasattr(chunk, 'actions') and chunk.actions:
+                    try:
+                        import json
+                        metadata['actions'] = json.loads(chunk.actions) if isinstance(chunk.actions, str) else chunk.actions
+                    except:
+                        metadata['actions'] = []
             
             # Collect context information
-            document_title = context.get('document_title', getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document')))
+            if isinstance(chunk, dict):
+                document_title = context.get('document_title', chunk.get('document_title', chunk.get('filename', 'Unknown Document')))
+            else:
+                document_title = context.get('document_title', getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document')))
             document_date = context.get('document_date', 'Unknown date')
             
             context_part = f"**From {document_title} ({document_date})**\n"
-            context_part += f"Content: {chunk.enhanced_content or chunk.content}\n"
+            if isinstance(chunk, dict):
+                content = chunk.get('enhanced_content') or chunk.get('content', '')
+            else:
+                content = getattr(chunk, 'enhanced_content', None) or getattr(chunk, 'content', '')
+            context_part += f"Content: {content}\n"
             
             if metadata['speakers']:
                 context_part += f"Speakers: {', '.join(metadata['speakers'])}\n"
@@ -1861,8 +1951,12 @@ Examples:
             for speaker in metadata['speakers']:
                 if speaker not in speaker_contributions:
                     speaker_contributions[speaker] = []
+                if isinstance(chunk, dict):
+                    chunk_content = chunk.get('content', '')
+                else:
+                    chunk_content = getattr(chunk, 'content', '')
                 speaker_contributions[speaker].append({
-                    'content': chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content,
+                    'content': chunk_content[:200] + "..." if len(chunk_content) > 200 else chunk_content,
                     'meeting': document_title,
                     'date': document_date
                 })
@@ -1994,8 +2088,8 @@ Examples:
                 try:
                     # Use existing timeframe detection and date filtering
                     timeframe_docs = self.get_documents_by_timeframe(date_filter, user_id)
-                    # Extract document IDs from MeetingDocument objects
-                    filtered_doc_ids = [doc.document_id for doc in timeframe_docs]
+                    # Extract document IDs from document objects (now dicts from PostgreSQL)
+                    filtered_doc_ids = [doc.get('document_id') if isinstance(doc, dict) else doc.document_id for doc in timeframe_docs]
                     date_filtered_docs.extend(filtered_doc_ids)
                     logger.info(f"Date filter '{date_filter}' matched {len(filtered_doc_ids)} documents")
                 except Exception as e:
@@ -2035,11 +2129,11 @@ Examples:
             
             # Filter document_ids to only include documents from the detected timeframe
             if not document_ids:
-                document_ids = [doc.document_id for doc in timeframe_docs]
+                document_ids = [doc.get('document_id') if isinstance(doc, dict) else doc.document_id for doc in timeframe_docs]
                 logger.info(f"Using {len(document_ids)} documents from {detected_timeframe} timeframe")
             else:
                 # Intersect with timeframe documents
-                timeframe_doc_ids = {doc.document_id for doc in timeframe_docs}
+                timeframe_doc_ids = {doc.get('document_id') if isinstance(doc, dict) else doc.document_id for doc in timeframe_docs}
                 document_ids = [doc_id for doc_id in document_ids if doc_id in timeframe_doc_ids]
                 logger.info(f"Filtered to {len(document_ids)} documents in {detected_timeframe} timeframe")
             
@@ -2087,11 +2181,20 @@ Examples:
                 if current_doc is not None:
                     context_parts.append("\n" + "="*60 + "\n")
                 
-                context_parts.append(f"Document: {getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document'))}")
-                current_doc = chunk.document_id
+                if isinstance(chunk, dict):
+                    doc_title = chunk.get('document_title', chunk.get('filename', 'Unknown Document'))
+                    current_doc = chunk.get('document_id')
+                else:
+                    doc_title = getattr(chunk, 'document_title', getattr(chunk, 'filename', 'Unknown Document'))
+                    current_doc = getattr(chunk, 'document_id', None)
+                context_parts.append(f"Document: {doc_title}")
             
             # Add content without chunk numbering
-            context_parts.append(chunk.content)
+            if isinstance(chunk, dict):
+                content = chunk.get('content', '')
+            else:
+                content = getattr(chunk, 'content', '')
+            context_parts.append(content)
         
         context = "\n".join(context_parts)
         

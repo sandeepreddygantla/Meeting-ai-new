@@ -1,0 +1,2 @@
+# This file has been moved to .unused as it's no longer needed
+# FAISS vector operations are now handled by PostgreSQL pgvector extension
