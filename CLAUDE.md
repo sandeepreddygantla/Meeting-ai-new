@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Meetings AI is a Flask-based document analysis and chat application that processes meeting documents using OpenAI/Azure OpenAI LLM technologies. Features modular architecture with AI-powered document processing, semantic search, and conversational interfaces.
+Meetings AI is a Flask-based document analysis and chat application that processes meeting documents using OpenAI/Azure OpenAI LLM technologies. Features modular architecture with AI-powered document processing, semantic search, and conversational interfaces using PostgreSQL+pgvector for production-grade vector storage.
 
 ## Development Commands
 
@@ -33,39 +33,48 @@ BASE_PATH=/meetingsai                       # Optional, defaults to /meetingsai
 # AZURE_CLIENT_SECRET=your_azure_client_secret  
 # AZURE_PROJECT_ID=your_azure_project_id
 
+# PostgreSQL Configuration (required):
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=meetingsai
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=your_password
+
 # Create tiktoken cache directory
 mkdir tiktoken_cache
 ```
 
 ### Database Operations
-Uses SQLite + FAISS hybrid storage:
-- `meeting_documents.db` - SQLite for metadata, users, projects
-- `vector_index.faiss` - FAISS for semantic embeddings
-- `sessions.db` - Session storage
+Uses PostgreSQL + pgvector for unified storage:
+- PostgreSQL tables for metadata, users, projects, sessions
+- pgvector extension for high-performance vector similarity search
+- Single database system replacing previous SQLite+FAISS dual architecture
 
 ```bash
-# Reset vector database
-rm vector_index.faiss  # Auto-rebuilds on restart
+# PostgreSQL setup (ensure pgvector extension is installed)
+createdb meetingsai
+psql meetingsai -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
 ## Architecture Overview
 
-### Dual Architecture Pattern
-Two parallel implementations:
-1. **Legacy Monolithic** (`meeting_processor.py`): Original implementation
-2. **Modular Architecture** (`src/` directory): Clean separation of concerns
+### Clean PostgreSQL+pgvector Architecture
+Single unified implementation with clean separation of concerns:
 
 ### Core Components
-- `flask_app.py` - Main Flask application entry point
+- `flask_app.py` - Main Flask application entry point with PostgreSQL initialization
 - `meeting_processor.py` - Global AI client variables: `access_token`, `embedding_model`, `llm`
-- `src/database/` - DatabaseManager (SQLite + FAISS)
+- `src/database/postgres_manager.py` - PostgreSQL+pgvector database operations
+- `src/database/manager.py` - Compatibility layer delegating to PostgresManager
 - `src/services/` - Business logic: AuthService, ChatService, DocumentService, UploadService
 - `src/api/` - Flask blueprints for routes
 - `src/ai/` - LLM operations and query processing
 
 ### Key Design Patterns
 - **Global Variable Pattern:** All AI operations use globals from `meeting_processor.py`
+- **Compatibility Layer:** DatabaseManager delegates to PostgresManager for API compatibility
 - **Service Composition:** Shared DatabaseManager instance across services
+- **PostgreSQL-Only:** Single database system with pgvector for semantic search
 - **Environment Switching:** Modify initialization functions for OpenAI/Azure switching
 
 ## Critical Development Rules
@@ -97,10 +106,25 @@ Modify only these functions in `meeting_processor.py`:
 - `get_embedding_model()` - Return OpenAIEmbeddings or AzureOpenAIEmbeddings
 
 ### Database Access Pattern
-Always use DatabaseManager:
+Always use DatabaseManager (automatically delegates to PostgreSQL):
 ```python
-db_manager = DatabaseManager()
+db_manager = DatabaseManager()  # Initializes PostgresManager internally
 documents = db_manager.get_all_documents(user_id)
+```
+
+### PostgreSQL Connection Management
+Direct PostgreSQL access when needed:
+```python
+from src.database.postgres_manager import PostgresManager
+
+postgres_manager = PostgresManager(
+    host="localhost",
+    database="meetingsai", 
+    user="postgres",
+    password="your_password",
+    port=5432,
+    vector_dimension=1536
+)
 ```
 
 ## IIS Deployment & Performance
@@ -112,10 +136,11 @@ documents = db_manager.get_all_documents(user_id)
 - **Base Path:** Routes support `/meetingsai` prefix via `BASE_PATH`
 
 ### Performance Patterns
-- **Vector Operations:** Batch processing (100 vectors/batch) for memory efficiency
+- **Vector Operations:** pgvector extension with optimized similarity search
 - **Tiktoken Cache:** Directory at `tiktoken_cache/` for token caching
-- **Connection Pooling:** SQLite connections with WAL mode
-- **Session Management:** Custom SQLite session backend for IIS compatibility
+- **Connection Pooling:** PostgreSQL connection management with context managers
+- **Session Management:** PostgreSQL session backend for production scalability
+- **In-Memory Processing:** Documents processed in memory, no physical file storage needed
 
 ## Frontend Architecture
 
@@ -137,7 +162,7 @@ Located in `static/js/modules/mentions.js`:
 2. **Content Extraction:** .docx, .pdf, .txt support with fallbacks
 3. **AI Analysis:** LLM metadata extraction (topics, participants, decisions)
 4. **Chunking & Embedding:** RecursiveCharacterTextSplitter + text-embedding-3-large
-5. **Storage:** SQLite metadata + FAISS vector storage
+5. **Storage:** PostgreSQL metadata + pgvector embeddings in single database
 6. **Background Processing:** ThreadPoolExecutor with job tracking
 
 ## Environment Variables
@@ -149,6 +174,13 @@ AZURE_CLIENT_ID=...
 AZURE_CLIENT_SECRET=...
 AZURE_PROJECT_ID=...
 
+# Database Configuration (PostgreSQL + pgvector)
+POSTGRES_HOST=localhost                  # PostgreSQL host
+POSTGRES_PORT=5432                       # PostgreSQL port
+POSTGRES_DB=meetingsai                   # Database name
+POSTGRES_USER=postgres                   # Database user
+POSTGRES_PASSWORD=your_password          # Database password
+
 # Application Configuration  
 BASE_PATH=/meetingsai                   # Route prefix
 SECRET_KEY=your-flask-secret-key        # Flask sessions
@@ -157,16 +189,23 @@ TIKTOKEN_CACHE_DIR=tiktoken_cache       # Token caching
 
 ## Troubleshooting Common Issues
 
-### Vector Database Sync Problems
-If queries return "no relevant information":
+### PostgreSQL Connection Issues
+Check PostgreSQL service and pgvector extension:
 ```bash
-rm vector_index.faiss  # Force rebuild from SQLite on restart
+# Check PostgreSQL status
+systemctl status postgresql
+# OR
+pg_isready -h localhost -p 5432
+
+# Verify pgvector extension
+psql meetingsai -c "SELECT * FROM pg_extension WHERE extname = 'vector';"
 ```
 
 ### Enhanced Search Issues
-- Check user_id filtering in `src/database/manager.py`
+- Check user_id filtering in `src/database/postgres_manager.py`
 - Monitor logs for "Enhanced search returned 0 results"
 - Ensure enhanced processing for document-specific queries
+- Verify vector embeddings are being stored correctly
 
 ### LLM Initialization Failures  
 - Verify environment variables are set correctly
@@ -201,27 +240,45 @@ services = {
 
 ### Database Inspection
 ```bash
-# Basic database checks
-sqlite3 meeting_documents.db "SELECT COUNT(*) FROM documents;"
-python -c "import faiss; print(f'Vectors: {faiss.read_index('vector_index.faiss').ntotal}')"
+# PostgreSQL database checks
+psql meetingsai -c "SELECT COUNT(*) FROM documents;"
+psql meetingsai -c "SELECT COUNT(*) FROM document_chunks;"
+psql meetingsai -c "SELECT COUNT(*) FROM users;"
+
+# Check vector embeddings
+psql meetingsai -c "SELECT COUNT(*) FROM document_chunks WHERE embedding IS NOT NULL;"
 
 # Validate environment setup
 python -c "
 from meeting_processor import access_token, embedding_model, llm
 print(f'LLM: {\"✓\" if llm else \"✗\"}')
 print(f'Embedding: {\"✓\" if embedding_model else \"✗\"}')"
+
+# Test PostgreSQL connection
+python -c "
+from src.database.postgres_manager import PostgresManager
+try:
+    pm = PostgresManager()
+    stats = pm.get_database_stats()
+    print(f'PostgreSQL: ✓ ({stats.get(\"total_documents\", 0)} docs)')
+except Exception as e:
+    print(f'PostgreSQL: ✗ ({e})')
+"
 ```
 
 ## Processing Strategy
 
-### Dual Processing (Enhanced vs Legacy)
-`ChatService` uses enhanced processing for:
-- Queries expecting 10+ documents
-- Complex multi-meeting summaries
+### PostgreSQL+pgvector Processing
+`ChatService` leverages unified PostgreSQL processing for:
+- Vector similarity search using pgvector extension
+- Complex multi-meeting summaries with metadata filtering
 - Date range queries spanning multiple meetings
-- Project-wide analysis requests
+- Project-wide analysis with optimized SQL joins
+- Enhanced search with user isolation and permission filtering
 
-Legacy processing for:
-- Simple document lookups
-- Single meeting questions
+### Vector Search Architecture
+- **Embedding Model**: text-embedding-3-large (1536 dimensions)
+- **Vector Storage**: pgvector extension with optimized indexing
+- **Search Strategy**: Cosine similarity with metadata filters
+- **Performance**: Single database query combining text and vector search
 
