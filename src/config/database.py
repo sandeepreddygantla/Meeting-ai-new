@@ -177,8 +177,7 @@ def setup_database_session(app):
 def ensure_directories_exist():
     """Ensure required directories exist for the application."""
     directories = [
-        'uploads', 'temp', 'meeting_documents', 
-        'logs', 'backups', 'templates', 'static'
+        'logs', 'meeting_documents'  # Essential directories for PostgreSQL architecture
     ]
     
     for directory in directories:
@@ -198,6 +197,10 @@ def get_database_config() -> Dict[str, Any]:
     """
     return {
         'session_db_path': os.environ.get('SESSION_DB_PATH', 'sessions.db'),
-        'main_db_path': os.environ.get('MAIN_DB_PATH', 'meeting_documents.db'),
-        'vector_index_path': os.environ.get('VECTOR_INDEX_PATH', 'vector_index.faiss'),
+        # PostgreSQL configuration handled in postgres_manager.py
+        'postgres_host': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'postgres_port': os.environ.get('POSTGRES_PORT', '5432'),
+        'postgres_db': os.environ.get('POSTGRES_DB', 'meetingsai'),
+        'postgres_user': os.environ.get('POSTGRES_USER', 'postgres'),
+        'postgres_password': os.environ.get('POSTGRES_PASSWORD', 'Sandeep@0904'),
     }

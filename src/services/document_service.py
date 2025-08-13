@@ -186,7 +186,8 @@ class DocumentService:
     
     def prepare_upload_directory(self, user_id: str, username: str, project_id: Optional[str]) -> Tuple[bool, str, str]:
         """
-        Prepare upload directory structure for user.
+        PostgreSQL+pgvector architecture doesn't require physical file storage.
+        This method is kept for API compatibility but returns success immediately.
         
         Args:
             user_id: User ID
@@ -194,31 +195,15 @@ class DocumentService:
             project_id: Project ID (optional)
             
         Returns:
-            Tuple of (success, upload_folder_path, error_message)
+            Tuple of (success, placeholder_path, message)
         """
         try:
-            # Create user-specific directory structure
-            user_folder = f"meeting_documents/user_{username}"
-            
-            if project_id:
-                project_folder_name = "default"
-                if project_id:
-                    user_projects = self.db_manager.get_user_projects(user_id)
-                    selected_project = next((p for p in user_projects if p.project_id == project_id), None)
-                    if selected_project:
-                        project_folder_name = selected_project.project_name.replace(" ", "_").replace("/", "_").replace("\\", "_")
-                        project_folder_name = "".join(c for c in project_folder_name if c.isalnum() or c in ("_", "-"))
-                
-                upload_folder = os.path.join(user_folder, f"project_{project_folder_name}")
-            else:
-                upload_folder = user_folder
-            
-            os.makedirs(upload_folder, exist_ok=True)
-            return True, upload_folder, "Directory created successfully"
+            # No physical directory needed for PostgreSQL+pgvector
+            return True, "memory", "PostgreSQL+pgvector: No file storage needed"
             
         except Exception as e:
-            logger.error(f"Error preparing upload directory: {e}")
-            return False, "", f"Error preparing directory: {str(e)}"
+            logger.error(f"Error in upload directory check: {e}")
+            return False, "", f"Error: {str(e)}"
     
     def process_file_validation(self, files: List[Any], upload_folder: str, user_id: str) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], List[Dict[str, str]]]:
         """

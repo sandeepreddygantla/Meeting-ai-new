@@ -21,9 +21,8 @@ def get_static_url() -> str:
     return f'{get_base_path()}/static'
 
 
-def get_upload_folder() -> str:
-    """Get upload folder path."""
-    return os.environ.get('UPLOAD_FOLDER', 'uploads')
+# Upload folder not needed for PostgreSQL+pgvector architecture
+# Files are processed in memory and stored in database
 
 
 def get_max_file_size() -> int:
@@ -56,7 +55,6 @@ class Config:
     # Path settings
     BASE_PATH = get_base_path()
     STATIC_URL = get_static_url()
-    UPLOAD_FOLDER = get_upload_folder()
     MAX_CONTENT_LENGTH = get_max_file_size()
     
     # Database settings
