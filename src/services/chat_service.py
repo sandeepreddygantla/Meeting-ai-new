@@ -119,58 +119,107 @@ class ChatService:
             Statistics dictionary
         """
         try:
-            # If processor is available, use its comprehensive statistics
-            if self.processor and hasattr(self.processor, 'get_meeting_statistics'):
-                try:
-                    processor_stats = self.processor.get_meeting_statistics()
-                    if "error" not in processor_stats:
-                        logger.info(f"Retrieved processor stats: {processor_stats}")
-                        return processor_stats
-                    else:
-                        logger.warning(f"Processor stats error: {processor_stats.get('error')}")
-                except Exception as e:
-                    logger.error(f"Error getting processor statistics: {e}")
+            logger.info(f"[ChatService] get_chat_statistics called for user_id: {user_id}")
+            # Skip processor statistics - we need user-specific stats, not system-wide
+            # The processor's get_meeting_statistics() only returns system-wide data
+            # We need to generate user-specific statistics here
             
-            # Fallback to database manager comprehensive statistics
+            # Generate user-specific statistics using database manager
             try:
                 comprehensive_stats = self.db_manager.get_statistics()
                 logger.info(f"Database manager comprehensive stats: {comprehensive_stats}")
                 
-                if comprehensive_stats and 'vector_index' in comprehensive_stats:
-                    vector_info = comprehensive_stats['vector_index']
-                    database_info = comprehensive_stats.get('database', {})
+                # Get user-specific document count
+                user_documents = self.db_manager.get_all_documents(user_id)
+                active_documents = len(user_documents)
+                
+                # Debug logging
+                logger.info(f"Statistics for user_id: {user_id}")
+                logger.info(f"User documents found: {active_documents}")
+                logger.info(f"User documents: {[doc.get('filename', 'Unknown') for doc in user_documents[:5]]}")  # Log first 5 filenames
+                
+                # Get all documents (without user filter) for debugging
+                all_documents = self.db_manager.get_all_documents()
+                logger.info(f"Total documents in system: {len(all_documents)}")
+                if all_documents:
+                    logger.info(f"Sample document user_ids: {[doc.get('user_id', 'No user_id') for doc in all_documents[:5]]}")
+                
+                # Calculate total chunks from user documents
+                total_chunks = sum(doc.get('chunk_count', 0) for doc in user_documents if doc.get('chunk_count'))
+                
+                # Get date range from user documents (use upload_date instead of created_at)
+                dates = []
+                for doc in user_documents:
+                    date_val = doc.get('upload_date') or doc.get('created_at')
+                    if date_val:
+                        dates.append(date_val)
+                
+                earliest_date = min(dates) if dates else None
+                latest_date = max(dates) if dates else None
+                
+                # Format dates for better display
+                def format_date(date_obj):
+                    if not date_obj:
+                        return None
+                    try:
+                        if hasattr(date_obj, 'strftime'):
+                            return date_obj.strftime('%Y-%m-%d')
+                        else:
+                            # Handle string timestamps
+                            from datetime import datetime
+                            if 'T' in str(date_obj):
+                                # ISO format timestamp
+                                dt = datetime.fromisoformat(str(date_obj).replace('Z', '+00:00'))
+                                return dt.strftime('%Y-%m-%d')
+                            else:
+                                return str(date_obj)
+                    except Exception as e:
+                        logger.warning(f"Error formatting date {date_obj}: {e}")
+                        return str(date_obj) if date_obj else None
+                
+                formatted_earliest = format_date(earliest_date)
+                formatted_latest = format_date(latest_date)
+                
+                stats = {
+                    # User-facing statistics
+                    'total_meetings': active_documents,
+                    'total_chunks': total_chunks,
+                    'vector_index_size': total_chunks,
+                    'document_count': active_documents,
+                    'project_count': len(self.db_manager.get_user_projects(user_id)),
+                    'meeting_count': len(self.db_manager.get_user_meetings(user_id)),
                     
-                    # Get active document and chunk counts (excludes soft-deleted)
-                    active_documents = len(self.db_manager.get_all_documents(user_id))
-                    active_chunks = database_info.get('chunks_count', 0)  # Active chunks only from database
+                    # System-wide statistics from database
+                    'system_documents': len(all_documents) if all_documents else comprehensive_stats.get('documents', 0),
+                    'system_chunks': comprehensive_stats.get('chunks', 0),
+                    'active_users': comprehensive_stats.get('active_users', 0),
+                    'total_projects': comprehensive_stats.get('projects', 0),
+                    'database_size': comprehensive_stats.get('database_size', '0 MB'),
                     
-                    stats = {
-                        # Original format compatibility - use ACTIVE counts for user-facing stats
-                        'total_meetings': active_documents,
-                        'total_chunks': active_chunks,  # Use database count (active only) instead of FAISS count (includes soft-deleted)
-                        'vector_index_size': active_chunks,  # Show active chunks for user display
-                        'average_chunk_length': database_info.get('avg_chunk_length', 0),
-                        'earliest_meeting': database_info.get('earliest_date'),
-                        'latest_meeting': database_info.get('latest_date'),
-                        
-                        # Additional stats
-                        'document_count': active_documents,
-                        'vector_count': vector_info.get('total_vectors', 0),  # Keep actual FAISS count for technical monitoring
-                        'index_dimension': vector_info.get('dimension', 0),
-                        'index_type': vector_info.get('index_type'),
-                        'metadata_entries': vector_info.get('metadata_entries', 0),
-                        'project_count': len(self.db_manager.get_user_projects(user_id)),
-                        'meeting_count': len(self.db_manager.get_user_meetings(user_id)),
-                        
-                        # Soft deletion monitoring stats (for admin/debugging)
-                        'soft_deleted_documents': database_info.get('documents_soft_deleted', 0),
-                        'soft_deleted_chunks': database_info.get('chunks_soft_deleted', 0)
-                    }
-                else:
-                    raise Exception("No comprehensive stats available")
+                    # Date range
+                    'date_range': {
+                        'earliest': formatted_earliest,
+                        'latest': formatted_latest
+                    },
+                    'earliest_meeting': formatted_earliest,
+                    'latest_meeting': formatted_latest,
+                    
+                    # Technical details
+                    'vector_count': comprehensive_stats.get('chunks', 0),
+                    'index_dimension': 1536,  # text-embedding-3-large dimension
+                    'table_sizes': comprehensive_stats.get('table_sizes', {}),
+                    'timestamp': comprehensive_stats.get('timestamp')
+                }
+                
+                logger.info(f"Generated user stats: {stats}")
+                logger.info(f"Stats keys: {list(stats.keys())}")
+                logger.info(f"About to return user stats...")
+                return stats
                     
             except Exception as e:
                 logger.error(f"Error getting comprehensive stats, using fallback: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
                 
                 # Basic fallback statistics
                 stats = {

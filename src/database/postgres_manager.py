@@ -407,7 +407,7 @@ class PostgresManager:
                 if not file_hash:
                     # Generate a simple hash from filename + user_id if file_hash is empty
                     file_hash = hashlib.sha256(f"{document.user_id}_{document.filename}".encode()).hexdigest()[:16]
-                    logger.info(f"Generated fallback hash for {document.filename}: {file_hash}")
+                    logger.warning(f"Using fallback hash for {document.filename}: {file_hash} - This should not happen with proper document processing!")
                 
                 # Check if document already exists (any status)
                 cursor.execute("""
@@ -950,25 +950,137 @@ class PostgresManager:
             return None
     
     # Statistics and Maintenance
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive database statistics"""
+    def get_statistics(self, user_id: str = None) -> Dict[str, Any]:
+        """Get comprehensive database statistics with optional user filtering"""
         try:
+            from datetime import datetime
+            # Auto-detect user from Flask context if not provided
+            if user_id is None:
+                try:
+                    from flask_login import current_user
+                    if hasattr(current_user, 'user_id') and current_user.is_authenticated:
+                        user_id = current_user.user_id
+                        logger.info(f"Auto-detected user_id from Flask context: {user_id}")
+                except:
+                    pass  # No Flask context or user not authenticated
+                    
             with self.get_cursor() as (conn, cursor):
                 stats = {}
                 
-                # User statistics
+                if user_id:
+                    # User-specific statistics
+                    
+                    # User document statistics
+                    cursor.execute("SELECT COUNT(*) FROM documents WHERE user_id = %s AND is_deleted = FALSE;", (user_id,))
+                    user_documents = cursor.fetchone()[0]
+                    
+                    # User chunk statistics
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM document_chunks dc
+                        JOIN documents d ON dc.document_id = d.document_id
+                        WHERE d.user_id = %s AND d.is_deleted = FALSE;
+                    """, (user_id,))
+                    user_chunks = cursor.fetchone()[0]
+                    
+                    # User project statistics
+                    cursor.execute("SELECT COUNT(*) FROM projects WHERE user_id = %s;", (user_id,))
+                    user_projects = cursor.fetchone()[0]
+                    
+                    # User meeting statistics (if any)
+                    cursor.execute("SELECT COUNT(*) FROM meetings WHERE user_id = %s;", (user_id,))
+                    user_meetings = cursor.fetchone()[0]
+                    
+                    # User date range - extract meeting dates from filenames
+                    cursor.execute("""
+                        SELECT filename
+                        FROM documents 
+                        WHERE user_id = %s AND is_deleted = FALSE;
+                    """, (user_id,))
+                    documents = cursor.fetchall()
+                    
+                    # Extract meeting dates from filenames
+                    meeting_dates = []
+                    import re
+                    for doc in documents:
+                        filename = doc[0]
+                        # Extract date pattern YYYYMMDD from filename
+                        date_match = re.search(r'(\d{8})', filename)
+                        if date_match:
+                            date_str = date_match.group(1)
+                            try:
+                                meeting_date = datetime.strptime(date_str, '%Y%m%d').date()
+                                meeting_dates.append(meeting_date)
+                            except:
+                                pass  # Skip invalid dates
+                    
+                    # Get earliest and latest meeting dates
+                    if meeting_dates:
+                        earliest_date = min(meeting_dates)
+                        latest_date = max(meeting_dates)
+                    else:
+                        earliest_date = None
+                        latest_date = None
+                    
+                    # Format dates for display
+                    def format_date(date_obj):
+                        if not date_obj:
+                            return None
+                        try:
+                            if hasattr(date_obj, 'strftime'):
+                                return date_obj.strftime('%Y-%m-%d')
+                            else:
+                                # Handle string timestamps
+                                if 'T' in str(date_obj):
+                                    # ISO format timestamp
+                                    dt = datetime.fromisoformat(str(date_obj).replace('Z', '+00:00'))
+                                    return dt.strftime('%Y-%m-%d')
+                                else:
+                                    return str(date_obj)
+                        except Exception as e:
+                            logger.warning(f"Error formatting date {date_obj}: {e}")
+                            return str(date_obj) if date_obj else None
+                    
+                    formatted_earliest = format_date(earliest_date)
+                    formatted_latest = format_date(latest_date)
+                    
+                    # Build user-specific response
+                    stats = {
+                        # User specific data
+                        'user_documents': user_documents,
+                        'user_chunks': user_chunks, 
+                        'user_projects': user_projects,
+                        'user_meetings': user_meetings,
+                        
+                        # Date range
+                        'date_range': {
+                            'earliest': formatted_earliest,
+                            'latest': formatted_latest
+                        },
+                        'earliest_meeting': formatted_earliest,
+                        'latest_meeting': formatted_latest,
+                        
+                        # System data for comparison
+                        'active_users': 0,  # Will be filled below
+                        'documents': 0,     # Will be filled below  
+                        'chunks': 0,        # Will be filled below
+                        'projects': 0,      # Will be filled below
+                        'database_size': '', # Will be filled below
+                        'table_sizes': {},  # Will be filled below
+                        'timestamp': datetime.now().isoformat()
+                    }
+                else:
+                    stats = {}
+                
+                # Always include system-wide statistics
                 cursor.execute("SELECT COUNT(*) FROM users WHERE is_active = TRUE;")
                 stats['active_users'] = cursor.fetchone()[0]
                 
-                # Document statistics
                 cursor.execute("SELECT COUNT(*) FROM documents WHERE is_deleted = FALSE;")
                 stats['documents'] = cursor.fetchone()[0]
                 
-                # Chunk statistics  
                 cursor.execute("SELECT COUNT(*) FROM document_chunks;")
                 stats['chunks'] = cursor.fetchone()[0]
                 
-                # Project statistics
                 cursor.execute("SELECT COUNT(*) FROM projects;")
                 stats['projects'] = cursor.fetchone()[0]
                 
@@ -992,12 +1104,67 @@ class PostgresManager:
                 table_sizes = cursor.fetchall()
                 stats['table_sizes'] = {row[1]: row[2] for row in table_sizes}
                 
-                stats['timestamp'] = datetime.now().isoformat()
+                if not user_id:
+                    stats['timestamp'] = datetime.now().isoformat()
                 
                 return stats
                 
         except Exception as e:
             logger.error(f"Error getting statistics: {e}")
+            return {}
+    
+    def get_database_stats(self) -> Dict[str, Any]:
+        """Alias for get_statistics for compatibility"""
+        return self.get_statistics()
+    
+    def get_deletion_statistics(self) -> Dict[str, Any]:
+        """Get deletion and cleanup statistics"""
+        try:
+            with self.get_cursor() as (conn, cursor):
+                stats = {}
+                
+                # Total documents vs deleted documents
+                cursor.execute("SELECT COUNT(*) FROM documents;")
+                stats['total_documents'] = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM documents WHERE is_deleted = TRUE;")
+                stats['deleted_documents'] = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM documents WHERE is_deleted = FALSE;")
+                stats['active_documents'] = cursor.fetchone()[0]
+                
+                # Document chunks
+                cursor.execute("SELECT COUNT(*) FROM document_chunks;")
+                stats['total_chunks'] = cursor.fetchone()[0]
+                
+                # Orphaned chunks (chunks without documents)
+                cursor.execute("""
+                    SELECT COUNT(*) FROM document_chunks dc
+                    LEFT JOIN documents d ON dc.document_id = d.document_id
+                    WHERE d.document_id IS NULL OR d.is_deleted = TRUE;
+                """)
+                stats['orphaned_chunks'] = cursor.fetchone()[0]
+                
+                # Session cleanup stats
+                cursor.execute("SELECT COUNT(*) FROM sessions;")
+                stats['total_sessions'] = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE expires_at < CURRENT_TIMESTAMP;")
+                stats['expired_sessions'] = cursor.fetchone()[0]
+                
+                # Storage efficiency
+                stats['storage_efficiency'] = {
+                    'document_retention_rate': (stats['active_documents'] / max(stats['total_documents'], 1)) * 100,
+                    'chunk_cleanup_needed': stats['orphaned_chunks'] > 0,
+                    'session_cleanup_needed': stats['expired_sessions'] > 0
+                }
+                
+                stats['timestamp'] = datetime.now().isoformat()
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Error getting deletion statistics: {e}")
             return {}
     
     def cleanup_expired_sessions(self) -> int:

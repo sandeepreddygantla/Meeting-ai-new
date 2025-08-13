@@ -2570,19 +2570,24 @@ Document: {chunk['filename']} ({chunk['date']})
             # Create MeetingDocument object for processing
             meeting_doc = MeetingDocument(
                 document_id=document_id,
-                filename=filename,
-                date=extracted_date,
-                title=filename,
-                content=content,
-                content_summary="",
-                main_topics=[],
-                past_events=[],
-                future_actions=[],
-                participants=[],
                 user_id=user_id,
-                meeting_id=meeting_id,
                 project_id=project_id,
-                file_size=file_size
+                meeting_id=meeting_id,
+                filename=filename,
+                original_filename=filename,
+                file_path=file_path,
+                file_size=file_size,
+                file_hash=file_hash,  # Use the calculated SHA-256 hash
+                content=content,
+                processed_content=content,
+                summary="",
+                extracted_date=extracted_date,
+                topics=[],
+                decisions=[],
+                action_items=[],
+                speakers=[],
+                key_points=[],
+                questions=[]
             )
             
             # Process with enhanced chunking

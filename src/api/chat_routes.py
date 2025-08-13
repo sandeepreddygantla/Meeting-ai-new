@@ -111,20 +111,29 @@ def create_chat_blueprint(base_path: str, chat_service: ChatService) -> Blueprin
             logger.error(f"Chat error: {e}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
-    @chat_bp.route(f'{base_path}/api/stats')
+    @chat_bp.route(f'{base_path}/api/stats', methods=['GET'])
     @login_required
     def get_stats():
         """Get chat statistics."""
         try:
-            stats = chat_service.get_chat_statistics(current_user.user_id)
+            logger.info(f"[API] get_stats called for user: {current_user.user_id}")
             
-            if "error" in stats:
-                return jsonify({'success': False, 'error': stats['error']}), 500
+            # Get user-specific statistics directly from database manager
+            # This ensures we get the proper date formatting regardless of routing issues
+            stats = chat_service.db_manager.get_statistics(current_user.user_id)
+            logger.info(f"[API] Database returned user-specific stats")
             
+            if not stats:
+                logger.error(f"[API] No stats returned for user: {current_user.user_id}")
+                return jsonify({'success': False, 'error': 'Failed to retrieve statistics'}), 500
+            
+            logger.info(f"[API] Returning successful stats response with date range")
             return jsonify({'success': True, 'stats': stats})
             
         except Exception as e:
-            logger.error(f"Stats error: {e}")
+            logger.error(f"[API] Stats error: {e}")
+            import traceback
+            logger.error(f"[API] Traceback: {traceback.format_exc()}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
     @chat_bp.route(f'{base_path}/api/filters')
