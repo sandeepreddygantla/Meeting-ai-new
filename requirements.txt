@@ -7,7 +7,6 @@ langchain
 pandas
 numpy
 scikit-learn
-faiss-cpu
 python-docx
 PyPDF2
 tiktoken

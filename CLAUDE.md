@@ -79,6 +79,13 @@ Single unified implementation with clean separation of concerns:
 
 ## Critical Development Rules
 
+### Git and Repository Management
+**CRITICAL:** Do not use ANY git commands unless explicitly instructed:
+- Never run git status, git add, git commit, git push, or any other git commands
+- Only use git commands when the user specifically asks for git operations
+- Always wait for explicit user instruction before any git-related actions
+- Document this rule: "git command until i inform don't use the git update same in claude.md"
+
 ### Default Project Upload Confirmation
 Confirmation dialog for "Default Project" uploads:
 - Shows modal for Default Project or empty selection
