@@ -3557,7 +3557,6 @@ function showStats() {
                             <div><strong>Your Documents:</strong> ${stats.document_count || (stats.documents > 0 ? '3' : 0)}</div>
                             <div><strong>Your Chunks:</strong> ${stats.total_chunks || (stats.chunks > 0 ? '26' : 0)}</div>
                             <div><strong>Your Projects:</strong> ${stats.project_count || (stats.projects > 0 ? '3' : 0)}</div>
-                            <div><strong>Your Meetings:</strong> ${stats.meeting_count || 0}</div>
                             ${(stats.document_count || stats.documents || 0) === 0 ? '<div style="margin-top: 8px; padding: 8px; background: #FFF3E0; border-radius: 4px; font-size: 14px; color: #FF8A00;"><strong>ℹ️ No documents found for your account.</strong><br>Upload some documents to see your statistics!</div>' : ''}
                         </div>
                     </div>

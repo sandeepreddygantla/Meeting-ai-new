@@ -986,9 +986,7 @@ class PostgresManager:
                     cursor.execute("SELECT COUNT(*) FROM projects WHERE user_id = %s;", (user_id,))
                     user_projects = cursor.fetchone()[0]
                     
-                    # User meeting statistics (if any)
-                    cursor.execute("SELECT COUNT(*) FROM meetings WHERE user_id = %s;", (user_id,))
-                    user_meetings = cursor.fetchone()[0]
+                    # User meeting statistics removed - not used in UI
                     
                     # User date range - extract meeting dates from filenames
                     cursor.execute("""
@@ -1049,7 +1047,6 @@ class PostgresManager:
                         'user_documents': user_documents,
                         'user_chunks': user_chunks, 
                         'user_projects': user_projects,
-                        'user_meetings': user_meetings,
                         
                         # Date range
                         'date_range': {
